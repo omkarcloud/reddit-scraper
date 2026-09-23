@@ -1,0 +1,235 @@
+{
+ "rules": [
+  {
+   "kind": "link",
+   "description": "Due to an increase of showcases featuring AI content such as working with multiple AI models or wrappers around APIs, this is no longer allowed. Please post your showcases in the appropriate monthly showcase post or a daily thread instead.",
+   "short_name": "No showcase posts",
+   "violation_reason": "No showcase posts",
+   "created_utc": 1722664053,
+   "priority": 0,
+   "description_html": "<!-- SC_OFF --><div class=\"md\"><p>Due to an increase of showcases featuring AI content such as working with multiple AI models or wrappers around APIs, this is no longer allowed. Please post your showcases in the appropriate monthly showcase post or a daily thread instead.</p>\n</div><!-- SC_ON -->"
+  },
+  {
+   "kind": "link",
+   "description": "If you are about to ask a question about how to do something in python, please check out r/LearnPython.\n\nIt is a very helpful community that is focused on helping people get answers that they understand.",
+   "short_name": "\"How do I\", Help, or similar questions belong in r/LearnPython",
+   "violation_reason": "belongs in r/LearnPython",
+   "created_utc": 1652981193,
+   "priority": 1,
+   "description_html": "<!-- SC_OFF --><div class=\"md\"><p>If you are about to ask a question about how to do something in python, please check out <a href=\"/r/LearnPython\">r/LearnPython</a>.</p>\n\n<p>It is a very helpful community that is focused on helping people get answers that they understand.</p>\n</div><!-- SC_ON -->"
+  },
+  {
+   "kind": "link",
+   "description": "Please use other subreddits for things that are more generally programmer related, or for things that involve large snakes.",
+   "short_name": "Posts must be relevant to the Python Programming Language",
+   "violation_reason": "Not related to Python programming language",
+   "created_utc": 1652981193,
+   "priority": 2,
+   "description_html": "<!-- SC_OFF --><div class=\"md\"><p>Please use other subreddits for things that are more generally programmer related, or for things that involve large snakes.</p>\n</div><!-- SC_ON -->"
+  },
+  {
+   "kind": "link",
+   "description": "When posting a project please include an image showing your project if applicable, a textual description of your project including how Python is relevant to it and a link to source code.\n\nWe do not want an arbitrary link that we then have to go read to understand.",
+   "short_name": "When posting projects please include both description text and a link to source code",
+   "violation_reason": "Source code or text description of projects",
+   "created_utc": 1652981193,
+   "priority": 3,
+   "description_html": "<!-- SC_OFF --><div class=\"md\"><p>When posting a project please include an image showing your project if applicable, a textual description of your project including how Python is relevant to it and a link to source code.</p>\n\n<p>We do not want an arbitrary link that we then have to go read to understand.</p>\n</div><!-- SC_ON -->"
+  },
+  {
+   "kind": "link",
+   "description": "When posting a project you must use a showcase flair & use a text post, not an image post, video post or similar.\n\nUsing new Reddit you may embed these media types within the post body, including multiple images in one post.\n\nPlease write a bit about your project instead of just dumping links since it will increase the relevance of your project to the Python subreddit.",
+   "short_name": "Project posts must use showcase flairs and must be text",
+   "violation_reason": "Project posts must use showcase flairs and must be text",
+   "created_utc": 1652981193,
+   "priority": 4,
+   "description_html": "<!-- SC_OFF --><div class=\"md\"><p>When posting a project you must use a showcase flair &amp; use a text post, not an image post, video post or similar.</p>\n\n<p>Using new Reddit you may embed these media types within the post body, including multiple images in one post.</p>\n\n<p>Please write a bit about your project instead of just dumping links since it will increase the relevance of your project to the Python subreddit.</p>\n</div><!-- SC_ON -->"
+  },
+  {
+   "kind": "link",
+   "description": "Titles for all submissions should describe the topic of the post and offer redditors an idea of what the link or text covers. Vague titles which require clicking through to clarify the subject matter of the post will be removed.\n\nThis also goes for just posting abstract links with no description about what it is you are sharing.",
+   "short_name": "Submissions must be descriptive",
+   "violation_reason": "Submissions must be descriptive",
+   "created_utc": 1652981193,
+   "priority": 5,
+   "description_html": "<!-- SC_OFF --><div class=\"md\"><p>Titles for all submissions should describe the topic of the post and offer redditors an idea of what the link or text covers. Vague titles which require clicking through to clarify the subject matter of the post will be removed.</p>\n\n<p>This also goes for just posting abstract links with no description about what it is you are sharing.</p>\n</div><!-- SC_ON -->"
+  },
+  {
+   "kind": "all",
+   "description": "All shared resources in posts and comments must be freely accessible without payment or subscription. This includes, but is not limited to, articles, courses, tutorials, and code repositories. Redirect paywalled content to anywhere but here.",
+   "short_name": "No Paywalled Content",
+   "violation_reason": "Paywall",
+   "created_utc": 1699366031,
+   "priority": 6,
+   "description_html": "<!-- SC_OFF --><div class=\"md\"><p>All shared resources in posts and comments must be freely accessible without payment or subscription. This includes, but is not limited to, articles, courses, tutorials, and code repositories. Redirect paywalled content to anywhere but here.</p>\n</div><!-- SC_ON -->"
+  },
+  {
+   "kind": "link",
+   "description": "Banned links can include Medium.com and similar content and paywalled content. \n\nLow quality blogs and similar (similar to what is hosted on many Medium.com articles) is not allowed.",
+   "short_name": "No Banned Links",
+   "violation_reason": "Banned Link Sharing",
+   "created_utc": 1707284599,
+   "priority": 7,
+   "description_html": "<!-- SC_OFF --><div class=\"md\"><p>Banned links can include Medium.com and similar content and paywalled content. </p>\n\n<p>Low quality blogs and similar (similar to what is hosted on many Medium.com articles) is not allowed.</p>\n</div><!-- SC_ON -->"
+  },
+  {
+   "kind": "all",
+   "description": "To ensure effective communication and ease of moderation within the community, all posts and comments must be in English. All non-English content should translated before posting.\n\nThis is mostly due to the capabilities and time constraints of the moderation staff and the predominance of English-speaking users in our community.",
+   "short_name": "Non-English Language",
+   "violation_reason": "Non-English language content",
+   "created_utc": 1699780512,
+   "priority": 8,
+   "description_html": "<!-- SC_OFF --><div class=\"md\"><p>To ensure effective communication and ease of moderation within the community, all posts and comments must be in English. All non-English content should translated before posting.</p>\n\n<p>This is mostly due to the capabilities and time constraints of the moderation staff and the predominance of English-speaking users in our community.</p>\n</div><!-- SC_ON -->"
+  },
+  {
+   "kind": "all",
+   "description": "Obviously we can't enforce this one very easily, it more is a level of trust we have in our users. Please do not downvote comments without providing valid reasoning for doing so. This rule helps maintain a positive atmosphere on the subreddit with both posts and comments.",
+   "short_name": "Please don't downvote without commenting your reasoning for doing so",
+   "violation_reason": "Please don't downvote without commenting your reasoning for doing so",
+   "created_utc": 1652981193,
+   "priority": 9,
+   "description_html": "<!-- SC_OFF --><div class=\"md\"><p>Obviously we can&#39;t enforce this one very easily, it more is a level of trust we have in our users. Please do not downvote comments without providing valid reasoning for doing so. This rule helps maintain a positive atmosphere on the subreddit with both posts and comments.</p>\n</div><!-- SC_ON -->"
+  },
+  {
+   "kind": "link",
+   "description": "Showcase posts must have these sections in order to give a good idea for target audience, intended use, goals, etc.\n\n- **What My Project Does**\n- **Target Audience** (e.g., Is it meant for production, just a toy project, etc.\n- **Comparison** (A brief comparison explaining how it differs from existing alternatives.)",
+   "short_name": "Showcases must include required sections",
+   "violation_reason": "Showcase does not give enough detail",
+   "created_utc": 1708051793,
+   "priority": 10,
+   "description_html": "<!-- SC_OFF --><div class=\"md\"><p>Showcase posts must have these sections in order to give a good idea for target audience, intended use, goals, etc.</p>\n\n<ul>\n<li><strong>What My Project Does</strong></li>\n<li><strong>Target Audience</strong> (e.g., Is it meant for production, just a toy project, etc.</li>\n<li><strong>Comparison</strong> (A brief comparison explaining how it differs from existing alternatives.)</li>\n</ul>\n</div><!-- SC_ON -->"
+  }
+ ],
+ "site_rules": [
+  "Spam",
+  "Personal and confidential information",
+  "Threatening, harassing, or inciting violence"
+ ],
+ "site_rules_flow": [
+  {
+   "reasonTextToShow": "This is spam",
+   "reasonText": "This is spam"
+  },
+  {
+   "reasonTextToShow": "This is misinformation",
+   "reasonText": "This is misinformation"
+  },
+  {
+   "nextStepHeader": "In what way?",
+   "reasonTextToShow": "This is abusive or harassing",
+   "nextStepReasons": [
+    {
+     "nextStepHeader": "Who is the harassment targeted at?",
+     "reasonTextToShow": "It's targeted harassment",
+     "nextStepReasons": [
+      {
+       "reasonTextToShow": "At me",
+       "reasonText": "It's targeted harassment at me"
+      },
+      {
+       "reasonTextToShow": "At someone else",
+       "reasonText": "It's targeted harassment at someone else"
+      }
+     ],
+     "reasonText": ""
+    },
+    {
+     "nextStepHeader": "Who is the threat directed at?",
+     "reasonTextToShow": "It threatens violence or physical harm",
+     "nextStepReasons": [
+      {
+       "reasonTextToShow": "At me",
+       "reasonText": "It threatens violence or physical harm at me"
+      },
+      {
+       "reasonTextToShow": "At someone else",
+       "reasonText": "It threatens violence or physical harm at someone else"
+      }
+     ],
+     "reasonText": ""
+    },
+    {
+     "reasonTextToShow": "It's rude, vulgar or offensive",
+     "reasonText": "It's rude, vulgar or offensive"
+    },
+    {
+     "reasonTextToShow": "It's abusing the report button",
+     "canWriteNotes": true,
+     "isAbuseOfReportButton": true,
+     "notesInputTitle": "Additional information (optional)",
+     "reasonText": "It's abusing the report button"
+    }
+   ],
+   "reasonText": ""
+  },
+  {
+   "nextStepHeader": "What issue?",
+   "reasonTextToShow": "Other issues",
+   "nextStepReasons": [
+    {
+     "complaintButtonText": "File a complaint",
+     "complaintUrl": "https://www.reddit.com/api/report_redirect?thing=%25%28thing%29s&reason_code=COPYRIGHT&feature=from_r2",
+     "complaintPageTitle": "File a complaint?",
+     "reasonText": "It infringes my copyright",
+     "reasonTextToShow": "It infringes my copyright",
+     "fileComplaint": true,
+     "complaintPrompt": "If you think content on Reddit violates your intellectual property, please file a complaint at the link below:"
+    },
+    {
+     "complaintButtonText": "File a complaint",
+     "complaintUrl": "https://www.reddit.com/api/report_redirect?thing=%25%28thing%29s&reason_code=TRADEMARK&feature=from_r2",
+     "complaintPageTitle": "File a complaint?",
+     "reasonText": "It infringes my trademark rights",
+     "reasonTextToShow": "It infringes my trademark rights",
+     "fileComplaint": true,
+     "complaintPrompt": "If you think content on Reddit violates your intellectual property, please file a complaint at the link below:"
+    },
+    {
+     "reasonTextToShow": "It's personal and confidential information",
+     "reasonText": "It's personal and confidential information"
+    },
+    {
+     "reasonTextToShow": "It's sexual or suggestive content involving minors",
+     "reasonText": "It's sexual or suggestive content involving minors"
+    },
+    {
+     "nextStepHeader": "Do you appear in the image?",
+     "reasonTextToShow": "It's involuntary pornography",
+     "nextStepReasons": [
+      {
+       "reasonTextToShow": "I appear in the image",
+       "reasonText": "It's involuntary pornography and i appear in it"
+      },
+      {
+       "reasonTextToShow": "I do not appear in the image",
+       "reasonText": "It's involuntary pornography and i do not appear in it"
+      }
+     ],
+     "reasonText": ""
+    },
+    {
+     "reasonTextToShow": "It's a transaction for prohibited goods or services",
+     "reasonText": "It's a transaction for prohibited goods or services"
+    },
+    {
+     "complaintButtonText": "File a complaint",
+     "complaintUrl": "https://www.reddit.com/api/report_redirect?thing=%25%28thing%29s&reason_code=DSA_OSA_AU&feature=from_r2",
+     "complaintPageTitle": "File a complaint?",
+     "reasonText": "Illegal/restricted content (EU, UK, and AU only)",
+     "reasonTextToShow": "Illegal/restricted content (EU, UK, and AU only)",
+     "fileComplaint": true,
+     "complaintPrompt": "EU, UK, and AU users only: Use this form to report content that you believe is illegal or restricted in your region, including terrorism, violence, and child sexual exploitation."
+    },
+    {
+     "usernamesInputTitle": "Username",
+     "reasonTextToShow": "Someone is considering suicide or serious self-harm.",
+     "canSpecifyUsernames": true,
+     "reasonText": "Someone is considering suicide or serious self-harm.",
+     "requestCrisisSupport": true,
+     "oneUsername": true
+    }
+   ],
+   "reasonText": ""
+  }
+ ]
+}

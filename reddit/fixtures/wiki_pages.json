@@ -1,0 +1,15 @@
+{
+ "kind": "wikipagelisting",
+ "data": [
+  "automoderator-schedule",
+  "config/description",
+  "config/sidebar",
+  "config/stylesheet",
+  "config/submit_text",
+  "faq",
+  "filters",
+  "flair",
+  "index",
+  "tbsettings"
+ ]
+}

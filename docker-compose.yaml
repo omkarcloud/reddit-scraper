@@ -1,0 +1,10 @@
+services:
+  reddit-scraper:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      # Optional — only above ~100 requests per 10 minutes (Reddit's per-IP limit).
+      # - REDDIT_PROXY=http://user:pass@host:port
