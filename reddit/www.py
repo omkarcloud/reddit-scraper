@@ -9,10 +9,11 @@ equivalent for, rendered with the app bearer (fetch.get_www):
 The pages embed no JSON; every unit carries its ids in a
 `data-faceplate-tracking-context` attribute (HTML-escaped JSON), so the
 extractors read ids from those attributes and the callers hydrate them
-through the JSON API (/api/info?id=… for comments and posts,
-/api/info?sr_name=… for subreddits — one call per page). The next page's
-cursor is the `cursor=` query of the trailing `<faceplate-partial
-src="/svc/shreddit/search/?…">` loader.
+through the JSON API (/by_id for posts, each comment's own thread for
+comments — the search context carries the comment's post id for that —
+and /r/<name>/about for subreddits; /api/info is walled since 2026-10-16).
+The next page's cursor is the `cursor=` query of the trailing
+`<faceplate-partial src="/svc/shreddit/search/?…">` loader.
 """
 import html
 import json
@@ -57,16 +58,25 @@ def next_cursor(page):
     return unquote(cursor) if cursor else None
 
 
-def search_comment_ids(page):
-    """Comment fullnames (t1_…) of a comment-search page, in result order,
-    with each one's post id."""
-    ids = []
+def search_comment_refs(page):
+    """[{"id": t1 fullname, "post_id": t3 fullname or None}] of a
+    comment-search page, in result order."""
+    out = []
+    seen = set()
     for ctx in _contexts(page):
         comment = ctx.get("comment") or {}
         cid = comment.get("id")
-        if isinstance(cid, str) and cid.startswith("t1_"):
-            ids.append(cid)
-    return _unique(ids)
+        if not isinstance(cid, str) or not cid.startswith("t1_") or cid in seen:
+            continue
+        seen.add(cid)
+        pid = comment.get("post_id") or (ctx.get("post") or {}).get("id")
+        out.append({"id": cid, "post_id": pid if isinstance(pid, str) and pid.startswith("t3_") else None})
+    return out
+
+
+def search_comment_ids(page):
+    """Comment fullnames (t1_…) of a comment-search page, in result order."""
+    return [ref["id"] for ref in search_comment_refs(page)]
 
 
 def search_post_ids(page):

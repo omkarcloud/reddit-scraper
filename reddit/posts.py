@@ -2,49 +2,72 @@
 flat export), duplicates / crossposts, batch lookup, submissions of an
 external URL, media download links, and single-comment details.
 
-`post` is {"id", "share"} from refs.resolve_post; `comment` is {"id",
+`post` is {"id", "share"[, "subreddit"]} from refs.resolve_post; `comment` is {"id",
 "post_id"} from refs.resolve_comment.
 
-Comment trees: /comments/<id> returns the post and a nested listing whose
-leaves are `more` nodes (Reddit loads at most `limit` comments per call,
-500 max). Every `more` becomes a {count, cursor} the caller feeds to
-/posts/comments/more; parsers.more_stub documents the cursor forms.
+Since 2026-10-20 20:00 UTC Reddit answers the JSON API's /comments/<id> with
+its network-security wall for the anonymous app bearer on every exit, so:
+  * the post itself (details, media) is read from /by_id/t3_<id>, which still
+    answers and carries the same post object (only `num_duplicates`, never
+    exposed, is absent);
+  * comment trees (comments, more, export, comment_details) come from
+    www.reddit.com's shreddit HTML through a local Chrome
+    (shreddit.py, browser.py): the tree partial, the POSTed "more comments" loaders and
+    the single-comment partial. Reddit folds replies itself there (a big
+    thread's first page is 25 top-level comments with their branches as
+    `more_replies` stubs), so `depth` is accepted but has no effect; `limit`
+    is the number of top-level comments read before the tail becomes a
+    `more_comments` cursor.
 """
 from . import parsers as P
 from . import shared as S
-from .fetch import RedditBadRequest, RedditNotFound, get_json
+from . import shreddit as H
+from .fetch import RedditBadRequest, RedditForbidden, RedditNotFound, get_json
 
-COMMENT_LIMIT_MAX = 500
 EXPORT_DEFAULT = 500
 EXPORT_MAX = 2000
-EXPORT_BATCH_CALLS = 40         # /api/morechildren calls an export may spend
+EXPORT_BATCH_CALLS = 80         # browser fetches an export may spend on folded branches
 
 
 def _pid(post):
     return S.post_id(post)
 
 
-def _thread(post_id, sort, limit, depth, comment=None, context=None):
-    params = {"sort": S.COMMENT_SORTS.get(sort, sort), "limit": limit, "depth": depth}
-    if comment:
-        params["comment"] = comment
-        params["context"] = context if context is not None else 0
-    payload = get_json(f"/comments/{post_id}", params, label=f"post {post_id}")
-    if not isinstance(payload, list) or len(payload) < 2:
-        raise RedditNotFound(f"post {post_id} not found")
-    post_children, _ = P.listing_children(payload[0])
-    parsed_post = P.post(post_children[0]) if post_children else None
-    if parsed_post is None:
-        raise RedditNotFound(f"post {post_id} not found")
-    return parsed_post, P.listing_children(payload[1])[0]
+def _post_json(path, params, post_id, subreddit, label):
+    """get_json for a post-scoped path, with Reddit's bare 403 / 404 turned
+    into a reasoned RedditNotFound (see shared.unavailable_post)."""
+    try:
+        return get_json(path, params, label=label)
+    except RedditForbidden:
+        raise S.unavailable_post(post_id, subreddit)
+    except RedditNotFound as e:
+        if e.reason:
+            raise
+        raise RedditNotFound(f"post {post_id} not found", reason="post_not_found", post_id=post_id)
+
+
+def _post_only(post_id, subreddit):
+    """The parsed post from /by_id/t3_<id> (one id: the multi-id form is
+    walled). An unknown id is a 404 there; a post Reddit no longer serves
+    (removed, banned / private subreddit) is an EMPTY listing, explained
+    through shared.unavailable_post like the bare 403 /comments gave."""
+    payload = _post_json(f"/by_id/t3_{post_id}", {"limit": 1}, post_id, subreddit, f"post {post_id}")
+    children, _ = P.listing_children(payload)
+    parsed = P.post(children[0]) if children else None
+    if parsed is None:
+        raise S.unavailable_post(post_id, subreddit)
+    return parsed
+
+
+def _sub_of(parsed_post, post):
+    return ((parsed_post.get("subreddit") or {}).get("name")) or S.post_subreddit(post)
 
 
 def details(post):
     """Everything about one post (title, body, author, flair, stats,
     flags, media, poll, crosspost parent) — no comments."""
     post_id = _pid(post)
-    parsed, _ = _thread(post_id, "best", 1, 0)
-    return {"post": parsed}
+    return {"post": _post_only(post_id, S.post_subreddit(post))}
 
 
 def comments(post, sort="best", cursor=None, limit=100, depth=None, comment=None, context=0):
@@ -55,10 +78,15 @@ def comments(post, sort="best", cursor=None, limit=100, depth=None, comment=None
         page = more(cursor)
         return {"post": None, "sort": sort, "comment_count": _count(page["comments"]), **page}
     post_id = _pid(post)
-    state = {"sort": sort, "limit": limit, "depth": depth}
-    parsed_post, children = _thread(post_id, sort, limit, depth, comment=comment, context=context)
-    tree, tail = P.comment_tree(children, post_id, state)
-    return {"post": parsed_post, "sort": sort, "comment_count": _count(tree), "comments": tree, "more_comments": tail}
+    parsed_post = _post_only(post_id, S.post_subreddit(post))
+    subreddit = _sub_of(parsed_post, post)
+    if comment:
+        page = H.focused(post_id, subreddit, comment, context or 0, sort)
+        if H._find(page["comments"], comment) is None:
+            raise RedditNotFound(f"comment {comment} not found", reason="comment_not_found", comment_id=comment, post_id=post_id)
+    else:
+        page = H.tree(post_id, subreddit, sort, limit)
+    return {"post": parsed_post, "sort": sort, "comment_count": _count(page["comments"]), **page}
 
 
 def _count(tree):
@@ -75,62 +103,21 @@ def more(cursor):
         state = P.decode_cursor(cursor)
     except ValueError as e:
         raise RedditBadRequest(str(e))
-    post_id = state.get("post")
-    sort = state.get("sort") or "best"
-    if not post_id:
-        raise RedditBadRequest("invalid cursor: pass the cursor value from the previous response unchanged")
-    if state.get("focus"):
-        _, children = _thread(post_id, sort, COMMENT_LIMIT_MAX, 10, comment=state["focus"], context=0)
-        tree, tail = P.comment_tree(children, post_id, {"sort": sort, "limit": COMMENT_LIMIT_MAX, "depth": 10})
-        focus = tree[0] if tree else None
-        return {"comments": (focus or {}).get("replies") or [], "more_comments": (focus or {}).get("more_replies") or tail}
-    if "skip" in state:
-        limit = state.get("limit") or COMMENT_LIMIT_MAX
-        depth = state.get("depth")
-        _, children = _thread(post_id, sort, limit, depth)
-        tail_ids = []
-        for child in children:
-            if child.get("kind") == "more" and (child.get("data") or {}).get("parent_id") == f"t3_{post_id}":
-                tail_ids = [c for c in (child["data"].get("children") or []) if c]
-        skip = int(state.get("skip") or 0)
-        ids = tail_ids[skip:skip + P.MORE_BATCH]
-        if not ids:
-            return {"comments": [], "more_comments": None}
-        roots, tail = _more_children(post_id, ids, sort)
-        remaining = len(tail_ids) - (skip + len(ids))
-        if remaining > 0:
-            next_state = dict(state)
-            next_state["skip"] = skip + len(ids)
-            tail = {"count": remaining, "cursor": P.encode_cursor(next_state)}
-        return {"comments": roots, "more_comments": tail}
-    ids = state.get("ids") or []
-    if not ids:
-        raise RedditBadRequest("invalid cursor: pass the cursor value from the previous response unchanged")
-    roots, tail = _more_children(post_id, ids, sort)
-    return {"comments": roots, "more_comments": tail}
-
-
-def _more_children(post_id, ids, sort):
-    payload = get_json("/api/morechildren", {
-        "link_id": f"t3_{post_id}", "children": ",".join(ids[:P.MORE_BATCH]),
-        "api_type": "json", "sort": S.COMMENT_SORTS.get(sort, sort),
-    }, label=f"post {post_id} more comments")
-    things = (((payload or {}).get("json") or {}).get("data") or {}).get("things") or []
-    return P.rebuild_tree(things, post_id, {"sort": sort})
+    return H.expand(state)
 
 
 def export(post, sort="best", max_comments=EXPORT_DEFAULT):
     """The whole thread as ONE flat, thread-ordered list (each comment
     followed by its replies, `depth` says how deep) with plain-text bodies —
     every folded branch is expanded until `max_comments`. Meant for
-    summarisation / sentiment pipelines. `meta.calls` counts the upstream
-    requests spent."""
+    summarisation / sentiment pipelines. `meta.calls` counts the browser
+    fetches spent."""
     post_id = _pid(post)
     max_comments = min(max_comments or EXPORT_DEFAULT, EXPORT_MAX)
-    parsed_post, children = _thread(post_id, sort, COMMENT_LIMIT_MAX, 10)
+    parsed_post = _post_only(post_id, S.post_subreddit(post))
+    page = H.tree(post_id, _sub_of(parsed_post, post), sort, limit=0)     # the tail is expanded below, counted
     calls = 1
-    state = {"sort": sort, "limit": COMMENT_LIMIT_MAX, "depth": 10}
-    tree, tail = P.comment_tree(children, post_id, state)
+    tree, tail = page["comments"], page["more_comments"]
     # expand folded branches breadth-first until the budget is spent
     pending = []
     if tail:
@@ -139,15 +126,14 @@ def export(post, sort="best", max_comments=EXPORT_DEFAULT):
     for node in _walk(tree):
         if node.get("more_replies"):
             pending.append((node, node["more_replies"]))
-    truncated = False
     while pending and calls < EXPORT_BATCH_CALLS and total < max_comments:
         holder, stub = pending.pop(0)
         try:
-            page = more(stub["cursor"])
-        except RedditBadRequest:
+            expanded = H.expand(P.decode_cursor(stub["cursor"]))
+        except (RedditBadRequest, ValueError):
             continue
-        calls += 1 if "skip" not in P.decode_cursor(stub["cursor"]) else 2
-        new_nodes = page["comments"]
+        calls += 1
+        new_nodes = expanded["comments"]
         if holder is None:
             tree.extend(new_nodes)
         else:
@@ -157,10 +143,9 @@ def export(post, sort="best", max_comments=EXPORT_DEFAULT):
         for node in _walk(new_nodes):
             if node.get("more_replies"):
                 pending.append((node, node["more_replies"]))
-        if page.get("more_comments"):
-            pending.append((holder, page["more_comments"]))
-    if pending or total > max_comments:
-        truncated = True
+        if expanded.get("more_comments"):
+            pending.append((holder, expanded["more_comments"]))
+    truncated = bool(pending) or total > max_comments
     flat = []
     for node in _walk(tree):
         if len(flat) >= max_comments:
@@ -178,7 +163,7 @@ def export(post, sort="best", max_comments=EXPORT_DEFAULT):
 def _walk(nodes):
     for node in nodes or []:
         yield node
-        yield from _walk(node.get("replies") or [])
+        yield from _walk(node.get("replies"))
 
 
 def _flat(node):
@@ -190,9 +175,10 @@ def _flat(node):
 def duplicates(post, cursor=None, limit=25):
     """Other submissions of the same link (crossposts and reposts)."""
     post_id = _pid(post)
-    payload = get_json(f"/duplicates/{post_id}", S.page_params(cursor, limit), label=f"post {post_id} duplicates")
+    payload = _post_json(f"/duplicates/{post_id}", S.page_params(cursor, limit), post_id, S.post_subreddit(post),
+                         f"post {post_id} duplicates")
     if not isinstance(payload, list) or not payload:
-        raise RedditNotFound(f"post {post_id} not found")
+        raise RedditNotFound(f"post {post_id} not found", reason="post_not_found", post_id=post_id)
     post_children, _ = P.listing_children(payload[0])
     original = P.post(post_children[0]) if post_children else None
     listing = P.parse_listing(payload[1], P.post, "duplicates") if len(payload) > 1 else {"duplicates": [], "next_cursor": None, "has_more": False}
@@ -213,8 +199,11 @@ def batch(posts):
 
 
 def by_url(url, cursor=None, limit=25):
-    """Every Reddit submission of an external URL (/api/info?url=)."""
-    return S.listing("/api/info", S.page_params(cursor, limit, url=url), P.post, "posts", url=url)
+    """Reddit submissions of an external URL: the search index's `url:`
+    operator (/api/info?url= is walled since 2026-10-16), so very fresh
+    submissions can lag a little."""
+    params = S.page_params(cursor, limit, q=f"url:{url}", type="link", include_over_18="on")
+    return S.listing("/search", params, P.post, "posts", url=url)
 
 
 def media(post):
@@ -224,7 +213,7 @@ def media(post):
     videos are resolved against their DASH manifest, so every rendition and
     the audio link are the exact files v.redd.it serves for that video."""
     post_id = _pid(post)
-    parsed, _ = _thread(post_id, "best", 1, 0)
+    parsed = _post_only(post_id, S.post_subreddit(post))
     source = parsed.get("crosspost_parent") or parsed
     media_block = source.get("media")
     renditions, audio_tracks = _renditions(media_block)
@@ -256,26 +245,29 @@ def _renditions(media_block):
     return manifest["videos"], manifest["audio"]
 
 
-def comment_details(comment, context=0):
-    """One comment with its author, body and stats (and `context`
-    ancestors when > 0), found through /api/info or its thread."""
+COMMENT_NEEDS_POST = ("a comment with `context` is read from its thread, which needs the post id: pass the "
+                      "comment's permalink (reddit.com/r/<sub>/comments/<post>/.../<comment>/) or the comment id "
+                      "together with `post`")
+
+
+def comment_details(comment, context=0, post=None):
+    """One comment with its author, body and stats — from its own shreddit
+    partial (a bare id is enough); with `context` > 0 the comment comes with
+    that many ancestors from the thread page, which needs the post id (from
+    the permalink or the `post` parameter)."""
     cid = comment["id"]
+    post_id = comment.get("post_id") or (_pid(post) if post else None)
     if not context:
-        things = S.info_by_ids([f"t1_{cid}"])
-        for thing in things:
-            parsed = P.comment(thing, include_replies=False)
-            if parsed:
-                return {"comment": parsed}
-        raise RedditNotFound(f"comment {cid} not found")
-    post_id = comment.get("post_id")
+        parsed = H.one(cid)
+        if not parsed:
+            raise RedditNotFound(f"comment {cid} not found", reason="comment_not_found", comment_id=cid, post_id=post_id)
+        return {"comment": S.with_post_refs([parsed])[0]}
     if not post_id:
-        things = S.info_by_ids([f"t1_{cid}"])
-        for thing in things:
-            post_id = ((thing.get("data") or {}).get("link_id") or "").split("_", 1)[-1] or None
-        if not post_id:
-            raise RedditNotFound(f"comment {cid} not found")
-    parsed_post, children = _thread(post_id, "best", COMMENT_LIMIT_MAX, 10, comment=cid, context=min(context, 10))
-    tree, _ = P.comment_tree(children, post_id, {"sort": "best", "limit": COMMENT_LIMIT_MAX, "depth": 10})
-    if not tree:
-        raise RedditNotFound(f"comment {cid} not found")
+        raise RedditBadRequest(COMMENT_NEEDS_POST, reason="post_required")
+    subreddit = comment.get("subreddit") or (S.post_subreddit(post) if post else None)
+    parsed_post = _post_only(post_id, subreddit)
+    page = H.focused(post_id, _sub_of(parsed_post, post or {}), cid, min(int(context), 10), "best")
+    tree = page["comments"]
+    if H._find(tree, cid) is None:
+        raise RedditNotFound(f"comment {cid} not found", reason="comment_not_found", comment_id=cid, post_id=post_id)
     return {"post": parsed_post, "comment": tree[0]}

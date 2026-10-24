@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402
 
-from reddit import parsers as P, refs, schemas, www  # noqa: E402
+from reddit import parsers as P, refs, schemas, shared as S, www  # noqa: E402
+from reddit.fetch import RedditNotFound  # noqa: E402
 from schema_fields import load_query  # noqa: E402
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
@@ -54,7 +55,51 @@ def test_resolve_subreddit_ids_and_profiles():
     "https://old.reddit.com/user/spez/comments/1wn1d94/slug/", "reddit.com/r/python/comments/1wn1d94/slug/abc123/",
 ])
 def test_resolve_post_forms(value):
-    assert refs.resolve_post(value) == {"id": "1wn1d94", "share": None}
+    out = refs.resolve_post(value)
+    assert out["id"] == "1wn1d94" and out["share"] is None
+    # the link's subreddit rides along (an unavailable post is diagnosed on it)
+    expected = "python" if "/r/python/" in value else "u_spez" if "/user/spez/" in value else None
+    assert out.get("subreddit") == expected
+
+
+def test_post_subreddit_from_links():
+    assert refs.resolve_post("https://www.reddit.com/r/u_Goon-Mission99/comments/1uy78c3/")["subreddit"] == "u_Goon-Mission99"
+    assert refs.resolve_post("https://www.reddit.com/u/Ajordan5_0/comments/1s0q0e1/x/")["subreddit"] == "u_Ajordan5_0"
+    assert S.post_subreddit({"id": None, "share": "/r/python/s/AbCdEf123"}) == "python"
+    assert S.post_subreddit({"id": "1wn1d94", "share": None}) is None
+    link = "https://www.reddit.com/r/TheRedPill/comments/3debh5/slug/abc123/"
+    assert refs.resolve_comment(link) == {"id": "abc123", "post_id": "3debh5", "subreddit": "TheRedPill"}
+
+
+@pytest.mark.parametrize("subreddit,answer,reason", [
+    ("justforfunzy", RedditNotFound("r/justforfunzy is banned", reason="subreddit_banned"), "subreddit_banned"),
+    ("TheRedPill", RedditNotFound("r/TheRedPill is quarantined", reason="subreddit_quarantined"), "subreddit_quarantined"),
+    ("lounge", RedditNotFound("r/lounge is gold only", reason="subreddit_gold_only"), "subreddit_gold_only"),
+    ("PrivateInvestigators", RedditNotFound("r/PrivateInvestigators is private", reason="subreddit_private"), "subreddit_private"),
+    ("nosuchsub12345", RedditNotFound("r/nosuchsub12345 not found"), "subreddit_not_found"),
+    ("u_Ajordan5_0", {"kind": "t2", "data": {"name": "Ajordan5_0", "is_suspended": True}}, "user_suspended"),
+    ("u_Goon-Mission99", RedditNotFound("u/Goon-Mission99 not found"), "user_not_found"),
+    ("u_spez", {"kind": "t2", "data": {"name": "spez", "is_suspended": None}}, "post_unavailable"),
+    ("python", {"kind": "t5", "data": {"display_name": "Python", "subreddit_type": "public"}}, "post_unavailable"),
+    (None, None, "post_unavailable"),
+])
+def test_unavailable_post_reasons(monkeypatch, subreddit, answer, reason):
+    calls = []
+
+    def fake_get_json(path, params=None, *, label=None, **kw):
+        calls.append(path)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(S, "get_json", fake_get_json)
+    err = S.unavailable_post("1tuxlrw", subreddit)
+    assert isinstance(err, RedditNotFound) and err.reason == reason and err.details["post_id"] == "1tuxlrw"
+    assert len(calls) == (0 if subreddit is None else 1)
+    if subreddit and subreddit.startswith("u_"):
+        assert calls == [f"/user/{subreddit[2:]}/about"]
+    if reason == "post_unavailable" and subreddit is None:
+        assert "full link" in str(err)
 
 
 def test_resolve_post_share_and_errors():
@@ -170,19 +215,12 @@ def test_comment_tree_and_more_stubs():
     assert decoded == {"post": "1wnwlhv", "sort": "top", "limit": 25, "depth": 4, "skip": 0}
     nested = next(c for c in comments if c["more_replies"])
     inner = P.decode_cursor(nested["more_replies"]["cursor"])
-    assert inner["post"] == "1wnwlhv" and inner["ids"]
+    assert inner["post"] == "1wnwlhv" and inner["ids"] and inner["focus"] == nested["id"]
+    assert inner["level"] == nested["depth"] + 1
     # replies nest and carry their parent id
     with_replies = next(c for c in comments if c["replies"])
     assert with_replies["replies"][0]["parent_comment_id"] == with_replies["id"]
     assert with_replies["replies"][0]["depth"] == 1
-
-
-def test_rebuild_tree_from_morechildren():
-    things = load("morechildren.json")["json"]["data"]["things"]
-    roots, tail = P.rebuild_tree(things, "1wnwlhv", {"sort": "top"})
-    assert roots and tail is None
-    for root in roots:
-        assert "replies" in root and "more_replies" in root
 
 
 def test_more_stub_forms():
@@ -190,6 +228,14 @@ def test_more_stub_forms():
     assert P.decode_cursor(focus["cursor"]) == {"post": "p1", "sort": None, "focus": "abc"}
     ids = P.more_stub({"kind": "more", "data": {"count": 3, "children": ["a", "b", "c"], "parent_id": "t3_p1"}}, "p1", {"sort": "new", "limit": 100})
     assert P.decode_cursor(ids["cursor"]) == {"post": "p1", "sort": "new", "ids": ["a", "b", "c"]}
+    nested = P.more_stub({"kind": "more", "data": {"count": 2, "children": ["d", "e"], "parent_id": "t1_abc"}}, "p1", {"sort": "new"})
+    assert P.decode_cursor(nested["cursor"]) == {"post": "p1", "sort": "new", "focus": "abc", "ids": ["d", "e"]}
+    # a focused thread read numbers depths from its focus: `offset` re-bases them
+    deep = P.more_stub({"kind": "more", "data": {"count": 1, "children": ["f"], "parent_id": "t1_abc", "depth": 1}}, "p1", {"sort": "new", "offset": 2})
+    assert P.decode_cursor(deep["cursor"])["level"] == 3
+    reply = {"kind": "t1", "data": {"id": "f", "depth": 1, "link_id": "t3_p1", "parent_id": "t1_abc"}}
+    assert P.comment(reply, {"offset": 2}, include_replies=False)["depth"] == 3
+    assert P.comment(reply, include_replies=False)["depth"] == 1
     assert P.more_stub({"kind": "more", "data": {"count": 0, "children": [], "parent_id": "t3_p1"}}, "p1") is None
 
 
@@ -258,6 +304,8 @@ def test_www_comment_search():
     page = load("www_search_comments.html")
     ids = www.search_comment_ids(page)
     assert len(ids) == 9 and ids[0] == "t1_paj0q5z" and all(i.startswith("t1_") for i in ids)
+    found = www.search_comment_refs(page)
+    assert [r["id"] for r in found] == ids and all(r["post_id"].startswith("t3_") for r in found)
     cursor = www.next_cursor(page)
     assert cursor and cursor.startswith("eyJ") and "%" not in cursor
 
@@ -304,6 +352,41 @@ def test_schemas():
     assert err
     data, _ = load_query(schemas.PostsByUrlSchema, {"url": "https://www.python.org/"})
     assert data["url"] == "https://www.python.org/"
+
+
+def test_inline_media_in_text_posts():
+    fx = load("inline_media_posts.json")
+    # one image pasted into the body (Patrik's example 1tz6rae)
+    post = P.post(fx["image"])
+    assert post["type"] == "text" and post["media"]["type"] == "inline"
+    assert post["media"]["images"] == [{
+        "id": "m7yuys7nef5h1", "type": "image", "link": "https://i.redd.it/m7yuys7nef5h1.png", "width": 960, "height": 540,
+        "mime": "image/png", "gif_link": None, "mp4_link": None, "dash_link": None, "caption": None, "outbound_link": None,
+        "status": "valid"}]
+    assert post["media"]["video"] is None and post["media"]["embed"] is None
+    # NSFW: Reddit's thumbnail is the word "nsfw" -> the file's own smallest preview instead of null
+    nsfw = P.post(fx["nsfw_image"])
+    assert nsfw["flags"]["is_nsfw"] and nsfw["media"]["type"] == "inline" and nsfw["media"]["images"][0]["id"] == "0vbumj09tnvh1"
+    assert nsfw["thumbnail"]["link"].startswith("https://preview.redd.it/0vbumj09tnvh1.png") and nsfw["thumbnail"]["width"] == 108
+    # videos + gifs + an image in one body (and a TikTok embed): items in body order, videos as HLS + DASH
+    rich = P.post(fx["video"])
+    items = rich["media"]["images"]
+    assert rich["type"] == "embed" and rich["media"]["embed"]["provider"] == "TikTok" and len(items) == 7
+    assert [i["type"] for i in items] == ["video", "video", "video", "animated_image", "animated_image", "image", "animated_image"]
+    body = fx["video"]["data"]["selftext"]
+    assert [body.find(i["id"]) for i in items] == sorted(body.find(i["id"]) for i in items)
+    video = items[0]
+    assert video["link"].startswith("https://v.redd.it/link/1x7wekc/asset/x8amz6i92xvh1/HLSPlaylist.m3u8")
+    assert video["dash_link"].startswith("https://v.redd.it/link/1x7wekc/asset/x8amz6i92xvh1/DASHPlaylist.mpd")
+    assert (video["width"], video["height"], video["mime"]) == (1268, 720, "video/mp4")
+    gif = items[3]
+    assert gif["link"] == "https://i.redd.it/o98tmexg4xvh1.gif" and gif["gif_link"] and gif["mp4_link"]
+    # a plain text post keeps media null; a comment video goes through the same item builder
+    assert P.post({"kind": "t3", "data": {"id": "x", "is_self": True, "selftext": "hi", "title": "t", "permalink": "/r/a/comments/x/t/"}})["media"] is None
+    comment = P.comment({"kind": "t1", "data": {"id": "c1", "link_id": "t3_x", "body": "/video/vid1/player", "media_metadata": {
+        "vid1": {"e": "RedditVideo", "status": "valid", "hlsUrl": "https://v.redd.it/link/x/asset/vid1/HLSPlaylist.m3u8?a=1",
+                 "dashUrl": "https://v.redd.it/link/x/asset/vid1/DASHPlaylist.mpd?a=1", "x": 100, "y": 50, "isGif": False, "id": "vid1"}}}})
+    assert comment["media"][0]["type"] == "video" and comment["media"][0]["dash_link"].endswith("DASHPlaylist.mpd?a=1")
 
 
 def test_dash_manifests():

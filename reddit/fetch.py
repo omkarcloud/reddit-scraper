@@ -17,11 +17,29 @@ What IS open from everywhere is the mobile app's anonymous OAuth flow:
      -> {"access_token": ..., "expires_in": 86400, "scope": "*"}
   2. GET https://oauth.reddit.com/<legacy path without .json>?raw_json=1
        Authorization: Bearer <token>        (any User-Agent works from here)
-     -> the full legacy JSON API: listings, /comments/<id>, /api/morechildren,
-        /search, /user/<name>/*, /r/<sr>/about[/rules|/wiki], /api/info,
-        /api/similar_subreddits, /subreddits/*, /api/subreddit_autocomplete_v2.
+     -> the legacy JSON API: listings, /comments/<id>[/_/<comment>], /by_id (ONE id),
+        /search, /user/<name>/*, /r/<sr>/about[/rules|/wiki],
+        /api/user_data_by_account_ids, /api/similar_subreddits, /subreddits/*,
+        /api/subreddit_autocomplete_v2.
+     Since 2026-10-16 /api/info (every form) and /api/morechildren answer
+     this bearer with the 403 "blocked by network security" page (every app
+     client id, every UA): shared.py hydrates by id through what is left.
+     Since 2026-10-20 20:00 UTC /comments/<id> in every form (bare,
+     /r/<sr>/comments/<id>, /comments/<post>/_/<comment>, any params, any
+     exit) answers the same page, while /by_id,
+     /duplicates, listings, /search and /about still answer JSON. Comment
+     trees therefore come from www.reddit.com through a local Chrome
+     (shreddit.py, browser.py); posts/details and
+     posts/media read the post from /by_id.
      www.reddit.com/*.json and api.reddit.com stay 403 even with the bearer;
      ONLY oauth.reddit.com serves JSON.
+
+     That wall page is 190 KB of UNCOMPRESSED HTML (no content-encoding)
+     with its marker text in the last 600 bytes, whereas a JSON answer is
+     5-90 KB gzip on the wire. The wall is ALSO a verdict on the token and
+     the exit that asked (2026-10-23: /search walled for the server's
+     bearer on every exit for hours while a freshly minted bearer passed),
+     so a wall discards both and the retry asks with new ones.
   3. The same bearer + app UA also renders www.reddit.com shreddit HTML and
      the /svc/shreddit/* partials without a captcha. Used only for what the
      JSON API lacks anonymously: comment search, media search, the explore
@@ -31,16 +49,18 @@ Rate limit (measured): 100 oauth requests per 10 minutes PER CLIENT IP —
 request 101 is a 429 with an empty body until `x-ratelimit-reset`. The
 bucket is per IP, not per token (a new token on the same IP is still 429),
 and the same token from a new IP gets a fresh 100. The token mint and the
-www pages have their own 200/10 min counters. Hence:
+www pages have their own 200/10 min counters. The limit is not paced or
+budgeted (2026-10-23): a token and an exit are used until
+Reddit answers them with anything but data, and then both are forgotten.
 
-  * ONE bearer per process (re-minted after REDDIT_TOKEN_TTL or on a 401).
-  * Direct egress first. Its budget is shared by every thread of the pod,
-    so exhaustion (remaining <= RESERVE, or a 429) is process-global: every
-    thread moves to residential exits for REDDIT_DIRECT_COOLDOWN seconds.
-  * Each thread on a proxied session holds a sticky residential exit and
-    rotates it (new port -> new IP) after REDDIT_EXIT_BUDGET requests, when
-    the exit's remaining budget runs out, or on a 429.
-  * REDDIT_PROXY_COUNTRY set -> proxied from the first request.
+  * ONE bearer per process, used until Reddit rejects it (401, 429, a wall
+    page) or REDDIT_TOKEN_TTL passes; the thread that saw the rejection
+    mints the replacement on its fresh exit, the other threads pick it up.
+  * Every request — token mint, oauth, www, v.redd.it manifests — goes
+    through REDDIT_PROXY when it is set (config.py), direct otherwise.
+  * Each thread holds its own sticky exit for as long as Reddit serves it:
+    it is dropped (new port -> new IP) on a 429, a wall page, a 401 or a
+    transport failure, never on a request count.
 
 Failure taxonomy (scraper_errors, mapped to HTTP by route_glue):
   RedditUpstreamError  transport failure / 5xx / unparsable body   — retryable
@@ -74,7 +94,6 @@ JSON_TIMEOUT = 40
 PAGE_TIMEOUT = 60           # shreddit pages are 300-800 KB
 TOKEN_TIMEOUT = 30
 FANOUT_WORKERS = 6
-RESERVE = 2                 # rotate the exit when x-ratelimit-remaining drops to this
 RETRY_STATUSES = (500, 502, 503, 504)
 
 PAGE_HEADERS = {
@@ -96,12 +115,29 @@ class RedditRateLimited(RedditBlocked):
     """HTTP 429: this exit's 10-minute budget is spent."""
 
 
-class RedditBadRequest(BadRequest):
+class RedditTokenRejected(RedditBlocked):
+    """HTTP 401: the bearer is dead — a new one was minted, retry at once."""
+
+
+class _Reasoned:
+    """A machine-readable `reason` code (and optional details such as the
+    subreddit / user involved) next to the human message; route_glue adds
+    both to the error body."""
+
+    default_reason = None
+
+    def __init__(self, message="", reason=None, **details):
+        super().__init__(message)
+        self.reason = reason or self.default_reason
+        self.details = {k: v for k, v in details.items() if v is not None}
+
+
+class RedditBadRequest(_Reasoned, BadRequest):
     """Upstream 400, or a redirect to a surface the API does not serve
     anonymously — never retried."""
 
 
-class RedditNotFound(NotFound):
+class RedditNotFound(_Reasoned, NotFound):
     """The subreddit / post / user / page does not exist, or is banned,
     private or quarantined — never retried."""
 
@@ -109,6 +145,19 @@ class RedditNotFound(NotFound):
 class RedditForbidden(RedditNotFound):
     """Reddit only serves this to a logged-in user (moderator lists, flair
     templates, saved items) — reported like a 404 to the caller."""
+
+    default_reason = "login_required"
+
+
+# Reddit's own `reason` on a 403 / 404 JSON body. Every one of them is about
+# the SUBREDDIT in the path (a user profile is the subreddit u_<name>).
+SUBREDDIT_REASONS = {
+    "banned": "subreddit_banned",
+    "private": "subreddit_private",
+    "gold_only": "subreddit_gold_only",
+    "quarantined": "subreddit_quarantined",
+    "gated": "subreddit_gated",
+}
 
 
 # ---- token -----------------------------------------------------------------------------
@@ -119,7 +168,7 @@ _token = {"value": None, "expires": 0.0}
 
 def _mint_token(session):
     """POST the installed_client grant -> bearer string. Uses the calling
-    thread's session (direct or proxied — the mint works from both)."""
+    thread's (always proxied) session."""
     basic = base64.b64encode(f"{config.REDDIT_CLIENT_ID}:".encode()).decode()
     headers = {
         "user-agent": config.REDDIT_APP_USER_AGENT,
@@ -135,6 +184,7 @@ def _mint_token(session):
     except Exception as e:
         raise RedditUpstreamError(f"token request failed: {type(e).__name__}: {e}")
     if resp.status_code == 429:
+        _drop_session()     # retry the mint on a fresh exit, not the same spent one
         raise RedditRateLimited("token endpoint rate-limited")
     if resp.status_code != 200:
         dump_debug("token_error", resp.text)
@@ -143,6 +193,7 @@ def _mint_token(session):
         payload = resp.json()
     except ValueError:
         dump_debug("token_nonjson", resp.text)
+        _drop_session()     # a Blocked is retried on a fresh exit (see _retrying)
         raise RedditBlocked("token endpoint returned a non-JSON body")
     token = payload.get("access_token")
     if not token:
@@ -150,15 +201,25 @@ def _mint_token(session):
     return token
 
 
-def bearer(force=False):
+def bearer(force=False, replace=None):
     """The process-wide app bearer, minted on first use and re-minted after
-    REDDIT_TOKEN_TTL seconds (or immediately with force=True after a 401)."""
+    REDDIT_TOKEN_TTL seconds, with force=True, or with replace=<token>
+    when Reddit rejected `token`: then a new one is minted only if `token`
+    is still the current bearer, so ten threads rejected at once cause one
+    mint, and the nine others pick up the first thread's replacement."""
     now = time.time()
-    if not force and _token["value"] and _token["expires"] > now:
-        return _token["value"]
+    current = _token["value"]
+    if replace is not None and current != replace:
+        return bearer()
+    if not force and replace is None and current and _token["expires"] > now:
+        return current
     with _token_lock:
-        if not force and _token["value"] and _token["expires"] > time.time():
-            return _token["value"]
+        current = _token["value"]
+        if replace is not None and current != replace:
+            return current
+        if not force and replace is None and current and _token["expires"] > time.time():
+            return current
+        _token["value"] = None          # a failed mint leaves no token: the next caller mints again
         token = _mint_token(_session())
         _token["value"] = token
         _token["expires"] = time.time() + config.REDDIT_TOKEN_TTL
@@ -167,40 +228,27 @@ def bearer(force=False):
 
 # ---- sessions / exits ----------------------------------------------------------------------
 # One curl session per worker thread (a curl handle must not be shared across
-# threads). The direct egress is one IP for the whole pod, so its rate-limit
-# state is process-global; proxied exits are per thread.
+# threads), kept until Reddit rejects it. With REDDIT_PROXY set every session
+# goes through it (a rotating proxy hands each new session a fresh IP);
+# without it they go direct.
 
 _local = threading.local()
-_direct_lock = threading.Lock()
-_direct = {"blocked_until": 0.0}
 
 
-def _direct_available():
-    return _direct["blocked_until"] <= time.time()
-
-
-def _use_proxy():
-    if config.reddit_proxy() is not None:
-        return True
-    return config.reddit_fallback_proxy() is not None and not _direct_available()
+def _proxy():
+    """The proxy for a new session (REDDIT_PROXY), or None = direct."""
+    return config.reddit_proxy()
 
 
 def _session():
-    want_proxy = _use_proxy()
     sess = getattr(_local, "session", None)
-    if sess is not None and getattr(sess, "_rd_proxied", False) != want_proxy:
-        _drop_session()
-        sess = None
     if sess is None:
         from curl_cffi import requests as curl_requests
+        proxy = _proxy()
         sess = curl_requests.Session(impersonate=IMPERSONATE)
-        proxy = None
-        if want_proxy:
-            proxy = config.reddit_proxy() or config.reddit_fallback_proxy()
         if proxy:
             sess.proxies = {"http": proxy, "https": proxy}
         sess._rd_proxied = bool(proxy)
-        sess._rd_used = 0
         _local.session = sess
     return sess
 
@@ -215,42 +263,16 @@ def _drop_session():
             pass
 
 
-def _exhaust(sess, reset_seconds=None):
-    """This session's exit is out of budget: rest the direct egress for the
-    cooldown (process-wide) or drop the proxied session so the next call
-    lands on a fresh sticky port."""
-    if getattr(sess, "_rd_proxied", False):
-        _drop_session()
-        return
-    wait = config.REDDIT_DIRECT_COOLDOWN
-    if reset_seconds is not None:
-        wait = min(wait, max(reset_seconds, 5) + 5)
-    with _direct_lock:
-        _direct["blocked_until"] = max(_direct["blocked_until"], time.time() + wait)
+def _discard(token):
+    """Reddit answered this thread's exit and `token` with something other
+    than data (429, 401, a wall page): forget both. The exit is dropped so
+    the retry lands on a fresh one, and the bearer is replaced — minted on
+    that fresh exit — unless another thread already replaced it."""
     _drop_session()
-
-
-def _account(sess, resp):
-    """Bookkeeping after every oauth/www response: rotate a proxied exit at
-    its budget, and treat a nearly spent bucket as spent (the next call
-    would be the 429)."""
-    sess._rd_used += 1
-    remaining = _header_float(resp, "x-ratelimit-remaining")
-    reset = _header_float(resp, "x-ratelimit-reset")
-    if remaining is not None and remaining <= RESERVE:
-        _exhaust(sess, reset)
-    elif getattr(sess, "_rd_proxied", False) and sess._rd_used >= config.REDDIT_EXIT_BUDGET:
-        _drop_session()
-
-
-def _header_float(resp, name):
-    value = resp.headers.get(name)
-    if value is None:
-        return None
     try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+        bearer(replace=token)
+    except RedditUpstreamError:
+        pass            # the retry mints again through its own headers
 
 
 def dump_debug(name, text):
@@ -266,6 +288,9 @@ def dump_debug(name, text):
 
 
 def _retrying(fn):
+    """Up to MAX_RETRIES attempts. A Blocked (429, 401, wall) already
+    discarded the exit and the token, so the retry goes straight out on
+    new ones; only a transport failure / 5xx waits RETRY_BACKOFF first."""
     last = None
     for attempt in range(1, config.MAX_RETRIES + 1):
         try:
@@ -273,7 +298,8 @@ def _retrying(fn):
         except (RedditBadRequest, RedditNotFound):
             raise
         except RedditBlocked as e:
-            last = e            # _exhaust already moved this thread to a new exit
+            last = e
+            continue
         except RedditUpstreamError as e:
             last = e
             _drop_session()
@@ -282,10 +308,18 @@ def _retrying(fn):
     raise last
 
 
-def _looks_like_wall(text):
-    head = (text or "")[:4000]
-    return ("blocked by network security" in head or "Prove your humanity" in head
-            or "captcha" in head.lower() and "<html" in head.lower())
+def _looks_like_wall(text, status=None):
+    """A captcha / network-security page. The markers are looked for in the
+    first 4 KB (a 200 shreddit page may legitimately quote them further
+    down); on a 403 the whole body is searched too, because the oauth wall
+    page carries "blocked by network security" at the very END of 190 KB
+    of inline CSS and base64 images (first seen 2026-10-23)."""
+    text = text or ""
+    head = text[:4000]
+    if ("blocked by network security" in head or "Prove your humanity" in head
+            or "captcha" in head.lower() and "<html" in head.lower()):
+        return True
+    return status == 403 and "blocked by network security" in text
 
 
 # ---- oauth JSON ---------------------------------------------------------------------------
@@ -307,9 +341,10 @@ def get_json(path, params=None, *, label=None, method="GET", data=None):
 
     def once():
         sess = _session()
+        token = bearer()
         headers = {
             "user-agent": config.REDDIT_APP_USER_AGENT,
-            "authorization": "Bearer " + bearer(),
+            "authorization": "Bearer " + token,
             "accept": "application/json",
             "accept-language": "en-US,en;q=0.9",
         }
@@ -323,23 +358,33 @@ def get_json(path, params=None, *, label=None, method="GET", data=None):
         status = resp.status_code
         text = resp.text or ""
         if status == 429:
-            _exhaust(sess, _header_float(resp, "x-ratelimit-reset"))
+            _discard(token)
             raise RedditRateLimited(f"rate-limited on {label}")
-        _account(sess, resp)
         if status == 401:
-            bearer(force=True)
-            raise RedditUpstreamError(f"app token rejected on {label} (re-minted)")
+            _discard(token)
+            raise RedditTokenRejected(f"app token rejected on {label} (re-minted)")
         if status in (301, 302, 303, 307, 308):
             target = resp.headers.get("location") or ""
-            if target.startswith(OAUTH + "/") and not getattr(sess, "_rd_followed", False):
-                # e.g. /about/sticky -> /r/<sr>/comments/<id>/<slug>/.json: served here
+            if "/subreddits/search" in target:
+                # an unknown subreddit redirects to the subreddit search
+                # listing (PRAW's Redirect); following it would parse search
+                # results as the requested data
+                raise RedditNotFound(f"{label} not found", reason="subreddit_not_found")
+            if target.startswith(OAUTH + "/"):
+                # e.g. /about/sticky -> /r/<sr>/comments/<id>/<slug>/.json: served here.
                 try:
-                    sess._rd_followed = True
-                    resp = sess.get(target, headers=headers, timeout=JSON_TIMEOUT, allow_redirects=False)
-                finally:
-                    sess._rd_followed = False
+                    resp = sess.get(target, params=None if "raw_json=" in target else {"raw_json": 1},
+                                    headers=headers, timeout=JSON_TIMEOUT, allow_redirects=False)
+                except Exception as e:
+                    raise RedditUpstreamError(f"request failed: {type(e).__name__}: {e}")
                 status = resp.status_code
                 text = resp.text or ""
+                if status == 429:
+                    _discard(token)
+                    raise RedditRateLimited(f"rate-limited on {label}")
+                if status == 401:
+                    _discard(token)
+                    raise RedditTokenRejected(f"app token rejected on {label} (re-minted)")
                 if status in (301, 302, 303, 307, 308):
                     raise RedditBadRequest(f"{label} is not served anonymously")
             else:
@@ -350,9 +395,9 @@ def get_json(path, params=None, *, label=None, method="GET", data=None):
         if not stripped.startswith(("{", "[")):
             if status == 404:
                 raise RedditNotFound(f"{label} not found")
-            if status == 403 and _looks_like_wall(text):
+            if status == 403 and _looks_like_wall(text, status):
                 dump_debug("wall", text)
-                _exhaust(sess)
+                _discard(token)
                 raise RedditBlocked(f"network-security wall on {label}")
             dump_debug("nonjson", text)
             raise RedditUpstreamError(f"HTTP {status} with a non-JSON body on {label}")
@@ -361,12 +406,12 @@ def get_json(path, params=None, *, label=None, method="GET", data=None):
         except ValueError:
             dump_debug("badjson", text)
             raise RedditUpstreamError(f"could not parse JSON from {label}")
+        reason = payload.get("reason") if isinstance(payload, dict) and status in (403, 404) else None
+        if reason in SUBREDDIT_REASONS:
+            raise RedditNotFound(f"{label} is {reason.replace('_', ' ')}", reason=SUBREDDIT_REASONS[reason])
         if status == 404:
             raise RedditNotFound(f"{label} not found")
         if status == 403:
-            reason = payload.get("reason") if isinstance(payload, dict) else None
-            if reason in ("private", "gold_only", "quarantined", "banned", "gated"):
-                raise RedditNotFound(f"{label} is {reason.replace('_', ' ')}")
             raise RedditForbidden(f"{label} is only available to logged-in users")
         if status == 400:
             raise RedditBadRequest(f"reddit rejected {label}: {_describe(payload)}")
@@ -385,18 +430,23 @@ def get_json(path, params=None, *, label=None, method="GET", data=None):
 
 # ---- www shreddit ---------------------------------------------------------------------------
 
-def get_www(path, params=None, *, label=None):
+def get_www(path, params=None, *, label=None, over18=False):
     """GET a www.reddit.com page or /svc/shreddit partial with the app bearer
-    -> HTML text. A captcha or netsec page is a RedditBlocked (fresh exit)."""
+    -> HTML text. A captcha or netsec page is a RedditBlocked (fresh exit).
+    `over18` sends the `over18=1` preference cookie, the only thing that
+    makes the search partials include NSFW posts (there is no query flag)."""
     label = label or path
     url = WWW + path
     query = {k: v for k, v in (params or {}).items() if v not in (None, "")}
 
     def once():
         sess = _session()
+        token = bearer()
         headers = dict(PAGE_HEADERS)
         headers["user-agent"] = config.REDDIT_APP_USER_AGENT
-        headers["authorization"] = "Bearer " + bearer()
+        headers["authorization"] = "Bearer " + token
+        if over18:
+            headers["cookie"] = "over18=1"
         try:
             resp = sess.get(url, params=query, headers=headers, timeout=PAGE_TIMEOUT, allow_redirects=True)
         except Exception as e:
@@ -404,19 +454,18 @@ def get_www(path, params=None, *, label=None):
         status = resp.status_code
         text = resp.text or ""
         if status == 429:
-            _exhaust(sess, _header_float(resp, "x-ratelimit-reset"))
+            _discard(token)
             raise RedditRateLimited(f"rate-limited on {label}")
-        _account(sess, resp)
         if status == 401:
-            bearer(force=True)
-            raise RedditUpstreamError(f"app token rejected on {label} (re-minted)")
+            _discard(token)
+            raise RedditTokenRejected(f"app token rejected on {label} (re-minted)")
         if status == 404:
             raise RedditNotFound(f"{label} not found")
         if status in RETRY_STATUSES:
             raise RedditUpstreamError(f"HTTP {status} on {label}")
-        if _looks_like_wall(text):
+        if _looks_like_wall(text, status):
             dump_debug("www_wall", text)
-            _exhaust(sess)
+            _discard(token)
             raise RedditBlocked(f"captcha wall on {label}")
         if status == 403:
             raise RedditForbidden(f"{label} is only available to logged-in users")
@@ -434,24 +483,27 @@ def resolve_redirect(path):
 
     def once():
         sess = _session()
+        token = bearer()
         headers = dict(PAGE_HEADERS)
         headers["user-agent"] = config.REDDIT_APP_USER_AGENT
-        headers["authorization"] = "Bearer " + bearer()
+        headers["authorization"] = "Bearer " + token
         try:
             resp = sess.get(url, headers=headers, timeout=PAGE_TIMEOUT, allow_redirects=False)
         except Exception as e:
             raise RedditUpstreamError(f"request failed: {type(e).__name__}: {e}")
         status = resp.status_code
         if status == 429:
-            _exhaust(sess, _header_float(resp, "x-ratelimit-reset"))
+            _discard(token)
             raise RedditRateLimited(f"rate-limited resolving {path}")
-        _account(sess, resp)
+        if status == 401:
+            _discard(token)
+            raise RedditTokenRejected(f"app token rejected resolving {path} (re-minted)")
         if status == 404:
             raise RedditNotFound(f"{path} not found")
         if status in (301, 302, 303, 307, 308):
             return resp.headers.get("location") or None
-        if _looks_like_wall(resp.text or ""):
-            _exhaust(sess)
+        if _looks_like_wall(resp.text or "", status):
+            _discard(token)
             raise RedditBlocked(f"captcha wall on {path}")
         return None
 
@@ -465,8 +517,10 @@ def get_video_manifest(base):
     header redirects to the captcha-walled www, hence `*/*`."""
     try:
         from curl_cffi import requests as curl_requests
+        proxy = _proxy()
         resp = curl_requests.get(base + "/DASHPlaylist.mpd", headers={"accept": "*/*"},
-                                 impersonate=IMPERSONATE, timeout=20)
+                                 impersonate=IMPERSONATE, timeout=20,
+                                 proxies={"http": proxy, "https": proxy} if proxy else None)
     except Exception:
         return None
     if resp.status_code != 200 or "<MPD" not in (resp.text or "")[:500]:

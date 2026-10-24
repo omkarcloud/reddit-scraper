@@ -17,9 +17,15 @@ def _name(user):
 
 
 def _about(name):
-    parsed = P.user(get_json(f"/user/{name}/about", label=f"u/{name}"))
+    try:
+        payload = S.about_json("user", name)
+    except RedditNotFound as e:
+        if e.reason:
+            raise
+        raise RedditNotFound(f"u/{name} not found (deleted or never existed)", reason="user_not_found", user=name)
+    parsed = P.user(payload)
     if parsed is None:
-        raise RedditNotFound(f"u/{name} not found")
+        raise RedditNotFound(f"u/{name} not found (deleted or never existed)", reason="user_not_found", user=name)
     return parsed
 
 

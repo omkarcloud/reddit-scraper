@@ -19,6 +19,10 @@ Entity shapes:
                content_categories, discussion_type, treatment_tags}
                `type`: text | image | gallery | video | gif | embed | link |
                poll | crosspost
+               `media.type`: image | gif | gallery | video | embed | link |
+               inline (files embedded in a text post's body, same item
+               shape as a gallery; a video item carries link = HLS playlist
+               and dash_link = DASH playlist)
   comment     {id, link, post_id, parent_comment_id, depth, text, text_html,
                created_at, edited_at, subreddit{name, id}, author{...},
                stats{score, is_score_hidden, controversiality}, flags{is_*},
@@ -374,34 +378,62 @@ def _gallery_images(data):
 
 
 def _metadata_image(media_id, info, caption=None, outbound=None):
+    """One media_metadata entry -> a media item. Image / AnimatedImage
+    entries carry the file in `s` ({u | gif, mp4, x, y}); a RedditVideo
+    entry has no `s` at all: its size is top-level and it offers only the
+    HLS / DASH playlists (dashUrl, hlsUrl), so `link` is the HLS one."""
     kind = clean(info.get("e"))
     mime = clean(info.get("m"))
     source = info.get("s") or {}
     ext = mime.split("/")[-1] if mime else None
     if ext == "jpeg":
         ext = "jpg"
-    original = f"https://i.redd.it/{media_id}.{ext}" if media_id and ext and kind == "Image" else None
+    # emotes / stickers (`t`: emoji | sticker, ids like emote|pack|name) are
+    # served from redditstatic, never i.redd.it: keep their `s.u` instead
+    hosted = bool(media_id) and media_id.isalnum() and clean(info.get("t")) not in ("emoji", "sticker")
+    original = f"https://i.redd.it/{media_id}.{ext}" if hosted and ext and kind == "Image" else None
+    hls = clean(info.get("hlsUrl")) if kind == "RedditVideo" else None
+    dash = clean(info.get("dashUrl")) if kind == "RedditVideo" else None
     return {
         "id": media_id,
         "type": {"Image": "image", "AnimatedImage": "animated_image", "RedditVideo": "video"}.get(kind, kind.lower() if kind else None),
-        "link": original or image_url(source.get("u")) or image_url(source.get("gif")),
-        "width": to_int(source.get("x")),
-        "height": to_int(source.get("y")),
-        "mime": mime,
+        "link": original or image_url(source.get("u")) or image_url(source.get("gif")) or hls,
+        "width": to_int(source.get("x") if source else info.get("x")),
+        "height": to_int(source.get("y") if source else info.get("y")),
+        "mime": mime or ("video/mp4" if kind == "RedditVideo" else None),
         "gif_link": image_url(source.get("gif")),
         "mp4_link": image_url(source.get("mp4")),
+        "dash_link": dash,
         "caption": caption,
         "outbound_link": outbound,
         "status": clean(info.get("status")),
     }
 
 
-def comment_media(data):
-    """Images / gifs embedded in a comment (media_metadata) -> [images]."""
+def _metadata_items(data, body=None):
+    """Every media_metadata entry -> [items], ordered by where each file
+    first appears in `body` (preview.redd.it/<id>.<ext> for images, the
+    /video/<id>/player link for videos); ids the body does not mention keep
+    Reddit's order after those."""
     meta = data.get("media_metadata")
     if not isinstance(meta, dict) or not meta:
         return []
-    return [_metadata_image(key, info or {}) for key, info in meta.items() if isinstance(info, dict)]
+    return [_metadata_image(k, meta[k]) for k in _metadata_keys(meta, body)]
+
+
+def _metadata_keys(meta, body=None):
+    """media_metadata ids in display order: where each first appears in
+    `body`, ids the body does not mention after those in Reddit's order."""
+    keys = [k for k, v in meta.items() if isinstance(v, dict)]
+    if body:
+        positions = {k: body.find(k) for k in keys}
+        keys.sort(key=lambda k: (positions[k] < 0, positions[k]))
+    return keys
+
+
+def comment_media(data):
+    """Images / gifs / videos embedded in a comment (media_metadata) -> [items]."""
+    return _metadata_items(data, data.get("body"))
 
 
 def oembed(data):
@@ -452,15 +484,22 @@ def post_type_and_media(data):
         image = {"id": None, "type": "animated_image" if is_gif else "image", "link": url,
                  "width": (poster or {}).get("width"), "height": (poster or {}).get("height"),
                  "mime": None, "gif_link": (preview or {}).get("gif_link"),
-                 "mp4_link": (preview or {}).get("mp4_link"), "caption": None, "outbound_link": None,
-                 "status": None}
+                 "mp4_link": (preview or {}).get("mp4_link"), "dash_link": None, "caption": None,
+                 "outbound_link": None, "status": None}
         return ("gif" if is_gif else "image"), {"type": "gif" if is_gif else "image", "images": [image],
                                                  "video": None, "embed": None, "preview": poster}
+    # images / gifs / videos pasted into a text post's body: Reddit lists
+    # them in media_metadata exactly like a gallery, but the post stays a
+    # text post (is_gallery false, no gallery_data)
+    inline = _metadata_items(data, data.get("selftext")) if to_bool(data.get("is_self")) else []
     embed = oembed(data)
     if hint == "rich:video" or embed:
-        return "embed", {"type": "embed", "images": [], "video": reddit_video(video_preview, poster) if video_preview else None,
+        # a text post whose body embeds a YouTube/… link AND pasted files keeps both
+        return "embed", {"type": "embed", "images": inline, "video": reddit_video(video_preview, poster) if video_preview else None,
                          "embed": embed, "preview": poster}
     if to_bool(data.get("is_self")):
+        if inline:
+            return "text", {"type": "inline", "images": inline, "video": None, "embed": None, "preview": poster}
         return "text", None
     if video_preview:
         return "gif", {"type": "gif", "images": [], "video": reddit_video(video_preview, poster), "embed": None,
@@ -487,10 +526,32 @@ def poll(data):
 
 
 def thumbnail(data):
+    """The post's thumbnail. Reddit replaces it with the words "nsfw" /
+    "spoiler" on such posts, so those fall back to the smallest preview of
+    the post's own files (media_metadata[..].p[0], else preview.images[0]
+    .resolutions[0]) rather than reporting nothing."""
     link = image_url(data.get("thumbnail"))
-    if not link:
+    if link:
+        return {"link": link, "width": to_int(data.get("thumbnail_width")), "height": to_int(data.get("thumbnail_height"))}
+    if clean(data.get("thumbnail")) not in ("nsfw", "spoiler"):
         return None
-    return {"link": link, "width": to_int(data.get("thumbnail_width")), "height": to_int(data.get("thumbnail_height"))}
+    meta = data.get("media_metadata")
+    if isinstance(meta, dict):
+        # the same first file the post's media lists: gallery order for a
+        # gallery, body order for files pasted into a text post
+        order = [clean(i.get("media_id")) for i in ((data.get("gallery_data") or {}).get("items") or [])
+                 if isinstance(i, dict)]
+        keys = [k for k in order if isinstance(meta.get(k), dict)] or _metadata_keys(meta, data.get("selftext"))
+        for key in keys:
+            small = _dimensions((meta[key].get("p") or [None])[0])
+            if small and small["link"]:
+                return small
+    images = (data.get("preview") or {}).get("images") or []
+    if images and isinstance(images[0], dict):
+        small = _dimensions((images[0].get("resolutions") or [None])[0])
+        if small and small["link"]:
+            return small
+    return None
 
 
 # ---- post -----------------------------------------------------------------------------------
@@ -573,7 +634,8 @@ def post_ref(data):
     streams (link_* fields)."""
     data = _data(data)
     post_id = refs.strip_kind(clean(data.get("link_id")))
-    if not post_id and not data.get("link_title"):
+    # every comment has link_id; only stream listings carry the link_* block
+    if not data.get("link_title"):
         return None
     permalink = clean(data.get("link_permalink"))
     author_name = clean(data.get("link_author"))
@@ -590,21 +652,31 @@ def post_ref(data):
 
 # ---- comment ----------------------------------------------------------------------------------
 
-MORE_BATCH = 100        # ids per /api/morechildren call
+MORE_BATCH = 100        # folded ids carried per cursor
 
 
 def more_stub(data, post_id, state=None):
     """A `more` node -> {count, cursor} for /posts/comments/more.
 
-    `state` is the listing's own {sort, limit, depth}. Three cursor forms:
-      {"post", "sort", "ids": [...]}         a nested node (<= MORE_BATCH ids)
+    `state` is the listing's own {sort, limit, depth}. Cursor forms:
+      {"post", "sort", "focus": parent id, "ids": [...]}
+                                             replies folded under a comment
+                                             (<= MORE_BATCH ids): expanded
+                                             from the parent's thread
+      {"post", "sort", "ids": [...]}         folded top-level comments
+                                             (<= MORE_BATCH ids): one thread
+                                             each, MORE_PAGE per page
       {"post", "sort", "limit", "depth", "skip": N}
                                              the listing's tail when it holds
                                              more than MORE_BATCH ids: the
                                              consumer re-reads the listing and
-                                             expands the next 100 from `skip`
+                                             expands the next page from `skip`
       {"post", "sort", "focus": comment id}  a "continue this thread" stub
                                              (no children, id "_")
+    The focus forms (and the ids left over from one) also carry `level`, the
+    folded comments' depth in the full tree: they are expanded from a thread
+    read focused on a comment, which numbers depths from that comment, so
+    the expansion re-bases them onto `level` (state `offset`, see comment).
     """
     data = _data(data)
     state = state or {}
@@ -617,20 +689,31 @@ def more_stub(data, post_id, state=None):
             payload.update({"limit": state.get("limit"), "depth": state.get("depth"), "skip": 0})
         else:
             payload["ids"] = children[:MORE_BATCH]
+            if parent.startswith("t1_"):
+                payload["focus"] = refs.strip_kind(parent)
     elif parent.startswith("t1_"):
         payload["focus"] = refs.strip_kind(parent)
     else:
         return None
+    level = (to_int(data.get("depth")) or 0) + (state.get("offset") or 0)
+    if payload.get("focus") and level > 0:
+        payload["level"] = level
     return {"count": to_int(data.get("count")) or len(children), "cursor": encode_cursor(payload)}
 
 
 def comment(thing, state=None, include_replies=True):
+    """A t1 thing -> comment. `state` {sort, limit, depth} is the listing's
+    own (for the more stubs); its `offset` is added to every depth (a thread
+    read focused on a comment numbers depths from that comment)."""
     data = _data(thing)
     if not data or not data.get("id"):
         return None
     post_id = refs.strip_kind(clean(data.get("link_id")))
     parent = clean(data.get("parent_id")) or ""
     permalink = clean(data.get("permalink"))
+    depth = to_int(data.get("depth"))
+    if depth is not None and (state or {}).get("offset"):
+        depth += state["offset"]
     replies = []
     more = None
     if include_replies:
@@ -650,7 +733,7 @@ def comment(thing, state=None, include_replies=True):
         "link": refs.comment_link(permalink, post_id, data.get("id")),
         "post_id": post_id,
         "parent_comment_id": refs.strip_kind(parent) if parent.startswith("t1_") else None,
-        "depth": to_int(data.get("depth")),
+        "depth": depth,
         "text": clean(data.get("body")),
         "text_html": clean(data.get("body_html")),
         "created_at": iso_utc(data.get("created_utc")),
@@ -699,46 +782,6 @@ def comment_tree(children, post_id, state=None):
             if parsed:
                 comments.append(parsed)
     return comments, more
-
-
-def rebuild_tree(things, post_id, state=None):
-    """/api/morechildren answers a FLAT list of t1 / more things (replies
-    are ""); nest them by parent_id. Nodes whose parent is not in the batch
-    become roots (their parents are already in the caller's tree)."""
-    nodes = {}
-    order = []
-    stubs = []
-    for thing in things or []:
-        data = _data(thing)
-        if thing.get("kind") == "more":
-            stubs.append((clean(data.get("parent_id")) or "", more_stub(data, post_id, state)))
-            continue
-        if thing.get("kind") != "t1":
-            continue
-        parsed = comment(thing, state, include_replies=False)
-        if not parsed:
-            continue
-        parsed["replies"] = []
-        parsed["more_replies"] = None
-        nodes["t1_" + parsed["id"]] = parsed
-        order.append((clean(data.get("parent_id")) or "", parsed))
-    roots = []
-    for parent, node in order:
-        holder = nodes.get(parent)
-        if holder is not None:
-            holder["replies"].append(node)
-        else:
-            roots.append(node)
-    tail = None
-    for parent, stub in stubs:
-        if stub is None:
-            continue
-        holder = nodes.get(parent)
-        if holder is not None:
-            holder["more_replies"] = stub
-        else:
-            tail = stub
-    return roots, tail
 
 
 # ---- subreddit ----------------------------------------------------------------------------------

@@ -36,6 +36,7 @@ _BARE_LINK_RE = re.compile(r"^(?:www\.|old\.|new\.|np\.|m\.|sh\.|i\.)?(?:reddit\
 _SUBREDDIT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_]{1,23}$")
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{2,24}$")
 _ID36_RE = re.compile(r"^[a-z0-9]{1,12}$")
+_SUBREDDIT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{2,30}$")   # user profile names may hold "-"
 _FULLNAME_RE = re.compile(r"^t([1235])_([a-z0-9]{1,12})$")
 _SHARE_RE = re.compile(r"^/r/[A-Za-z0-9_]+/s/[A-Za-z0-9]+/?$")
 
@@ -96,6 +97,18 @@ def resolve_subreddit(value):
 
 # ---- post ----------------------------------------------------------------------------------
 
+def _link_subreddit(parts):
+    """The subreddit a /r/<name>/… or /user/<name>/… link lives in (a
+    profile is the subreddit u_<name>), else None. Kept with the id so an
+    unavailable post can be diagnosed: Reddit names the reason only on the
+    subreddit / user, never on a bare post id."""
+    if len(parts) >= 2 and parts[0].lower() == "r" and _SUBREDDIT_NAME_RE.match(parts[1]):
+        return parts[1]
+    if len(parts) >= 2 and parts[0].lower() in ("user", "u") and _SUBREDDIT_NAME_RE.match(parts[1]):
+        return "u_" + parts[1]
+    return None
+
+
 def resolve_post(value):
     text = str(value or "").strip()
     if not text:
@@ -108,7 +121,11 @@ def resolve_post(value):
         if "comments" in low:
             i = low.index("comments")
             if i + 1 < len(parts):
-                return _post_id(parts[i + 1], value)
+                out = _post_id(parts[i + 1], value)
+                subreddit = _link_subreddit(parts[:i])
+                if subreddit:
+                    out["subreddit"] = subreddit
+                return out
         if low and low[0] == "gallery" and len(parts) >= 2:
             return _post_id(parts[1], value)
         if _SHARE_RE.match(parsed.path):
@@ -175,7 +192,11 @@ def resolve_comment(value):
                 comment_id = None
         if not comment_id or not _ID36_RE.match(comment_id.lower()):
             raise ValueError(f"no comment id in link {value!r}")
-        return {"id": comment_id.lower(), "post_id": post_id if post_id and _ID36_RE.match(post_id) else None}
+        out = {"id": comment_id.lower(), "post_id": post_id if post_id and _ID36_RE.match(post_id) else None}
+        subreddit = _link_subreddit(parts[:low.index("comments")]) if "comments" in low else None
+        if subreddit:
+            out["subreddit"] = subreddit
+        return out
     fullname = _fullname(text, "1")
     if fullname:
         return {"id": fullname, "post_id": None}

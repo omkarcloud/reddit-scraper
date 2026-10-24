@@ -40,8 +40,10 @@ def test_subreddits():
     assert call("/reddit/subreddits/wiki", subreddit="python")["page"]["content_markdown"]
     assert call("/reddit/subreddits/similar", subreddit="python")["subreddits"]
     assert call("/reddit/subreddits/sticky", subreddit="python")["post"]["flags"]["is_stickied"] is True
-    batch = call("/reddit/subreddits/batch", subreddits="python,learnpython,t5_2qh1i,doesnotexist123456")
-    assert batch["count"] == 3 and batch["missing"] == ["doesnotexist123456"]
+    batch = call("/reddit/subreddits/batch", subreddits="python,learnpython,doesnotexist123456")
+    assert batch["count"] == 2 and batch["missing"] == ["doesnotexist123456"]
+    by_id = call("/reddit/subreddits/batch", subreddits="python,t5_2qh1i")   # t5_ ids are unresolvable since 2026-10-16
+    assert by_id["count"] == 1 and by_id["missing"] == ["t5_2qh1i"] and "t5_" in by_id["note"]
     assert call("/reddit/subreddits/flairs", subreddit="python")["flairs"]
     assert call("/reddit/subreddits/popular", limit=5)["subreddits"]
     assert call("/reddit/subreddits/new", limit=5)["subreddits"]
@@ -65,9 +67,10 @@ def test_posts_and_comments():
     assert batch["count"] == 2 and batch["missing"] == ["zzzzzzz"]
     assert call("/reddit/posts/by-url", url="https://www.python.org/", limit=5)["posts"]
     assert "media" in call("/reddit/posts/media", post="1wnwlhv")
-    first = tree["comments"][0]["id"]
-    assert call("/reddit/comments/details", comment=first)["comment"]["id"] == first
-    assert call("/reddit/comments/details", comment=f"t1_{first}", context=1)["post"]["id"] == "1wnwlhv"
+    first = tree["comments"][0]
+    assert call("/reddit/comments/details", comment=first["link"])["comment"]["id"] == first["id"]
+    assert call("/reddit/comments/details", comment=f"t1_{first['id']}", post="1wnwlhv", context=1)["post"]["id"] == "1wnwlhv"
+    assert "pass the comment's permalink" in call("/reddit/comments/details", status=400, comment=first["id"])["error"]
 
 
 def test_users():
@@ -104,7 +107,16 @@ def test_search_and_feeds():
 
 def test_errors():
     assert "not found" in call("/reddit/subreddits/details", status=404, subreddit="thissubdoesnotexist12345")["error"]
-    assert "gold only" in call("/reddit/subreddits/details", status=404, subreddit="lounge")["error"]
+    lounge = call("/reddit/subreddits/details", status=404, subreddit="lounge")
+    assert "gold only" in lounge["error"] and lounge["reason"] == "subreddit_gold_only"
+    # an unavailable post names WHY (asked on its subreddit / author), with the link's subreddit
+    quarantined = call("/reddit/posts/details", status=404, post="https://www.reddit.com/r/TheRedPill/comments/3debh5/")
+    assert quarantined["reason"] == "subreddit_quarantined" and quarantined["subreddit"] == "TheRedPill"
+    assert call("/reddit/posts/details", status=404, post="3debh5")["reason"] == "post_unavailable"
+    assert call("/reddit/posts/details", status=404, post="zzzzzzzz")["reason"] == "post_not_found"
+    assert call("/reddit/users/details", status=404, user="zz_no_such_user_9q7x")["reason"] == "user_not_found"
+    # refresh=true bypasses the cache and is not a validation error
+    assert call("/reddit/posts/details", post="1wnwlhv", refresh="true")["post"]["id"] == "1wnwlhv"
     assert call("/reddit/users/details", status=404, user="zz_no_such_user_9q7x")["error"]
     assert call("/reddit/posts/details", status=404, post="zzzzzzzz")["error"]
     assert call("/reddit/posts/details", status=404, post="https://www.reddit.com/r/python/s/AbCdEfGhIj")["error"]

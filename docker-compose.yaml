@@ -4,7 +4,9 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"
+    shm_size: "1gb"              # Chrome needs more shared memory than Docker's 64 MB default
     environment:
       - PORT=8000
-      # Optional — only above ~100 requests per 10 minutes (Reddit's per-IP limit).
+      # Needed from cloud / datacenter IPs (Reddit walls them for comment pages) and above
+      # ~100 requests per 10 minutes (Reddit's per-IP limit): a rotating residential proxy.
       # - REDDIT_PROXY=http://user:pass@host:port

@@ -1,5 +1,7 @@
 bottle
 cheroot
 curl_cffi
+lxml
 marshmallow
+patchright
 pytest

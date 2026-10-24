@@ -85,7 +85,7 @@ class EmptySchema(BaseSchema):
 
 # ---- subreddits ----------------------------------------------------------------------------
 
-_SUBREDDIT_DOC = {"description": "subreddit name, r/name, t5_ id or a reddit.com/r/... link"}
+_SUBREDDIT_DOC = {"description": "subreddit name, r/name or a reddit.com/r/... link"}
 
 
 class SubredditSchema(BaseSchema):
@@ -153,15 +153,21 @@ class LeaderboardSchema(BaseSchema):
 
 # ---- posts -----------------------------------------------------------------------------------
 
-_POST_DOC = {"description": "post id, t3_ fullname, or a reddit.com post / share / redd.it link"}
+_POST_DOC = {"description": "post id, t3_ fullname, or a reddit.com post / share / redd.it link; pass the full "
+                            "reddit.com/r/<subreddit>/comments/<id>/ link to get the exact `reason` when the post is unavailable"}
+_REFRESH_DOC = {"description": "true = skip the cache and read the post live from Reddit (current removal status)"}
 
 
 class PostSchema(BaseSchema):
+    CACHE_REFRESH = True        # route_glue: `refresh` bypasses (and overwrites) the cached row
     post = PostRefField(metadata=_POST_DOC)
+    refresh = Flag(load_default=False, metadata=_REFRESH_DOC)
 
 
 class PostCommentsSchema(BaseSchema):
+    CACHE_REFRESH = True
     post = PostRefField(required=False, load_default=None, metadata=_POST_DOC)
+    refresh = Flag(load_default=False, metadata=_REFRESH_DOC)
     sort = ChoiceField(COMMENT_SORT_CHOICES, load_default="best")
     cursor = CursorField()
     limit = LimitField(default=100, max_size=500)
@@ -194,8 +200,10 @@ class PostPageSchema(PostSchema):
 
 
 class PostBatchSchema(BaseSchema):
+    CACHE_REFRESH = True
     posts = _RefList(refs.resolve_post, required=True,
                      metadata={"description": "comma-separated post ids / fullnames / links (max 100)"})
+    refresh = Flag(load_default=False, metadata=_REFRESH_DOC)
 
 
 class PostsByUrlSchema(BaseSchema):
@@ -205,7 +213,12 @@ class PostsByUrlSchema(BaseSchema):
 
 
 class CommentSchema(BaseSchema):
-    comment = CommentRefField(metadata={"description": "comment id, t1_ fullname or a comment permalink"})
+    CACHE_REFRESH = True
+    refresh = Flag(load_default=False, metadata={"description": "true = skip the cache and read the comment live from Reddit"})
+    comment = CommentRefField(metadata={"description": "a comment permalink (reddit.com/r/<sub>/comments/<post>/.../<comment>/), "
+                                                       "or a comment id / t1_ fullname together with `post`"})
+    post = PostRefField(required=False, load_default=None,
+                        metadata={"description": "the comment's post (id, t3_ fullname or link) when `comment` is a bare id"})
     context = PositiveInt(max_value=10, load_default=None)
 
 
@@ -262,6 +275,7 @@ class SearchWwwSchema(BaseSchema):
     sort = ChoiceField(WWW_SEARCH_SORTS, load_default="relevance")
     time = ChoiceField(TIME_FILTERS, load_default="all")
     cursor = CursorField()
+    include_nsfw = Flag(load_default=False, metadata={"description": "also return results from posts marked NSFW"})
 
 
 class AutocompleteSchema(BaseSchema):

@@ -40,13 +40,12 @@ Reddit Scraper is a **free and open-source** scraper that gets you **unlimited**
           "text": "Making sure we stay at the forefront of space exploration is a big priority for my administration. The passing of Neil Armstrong this week is a reminder of the…",
           "author": { "username": "PresidentObama" },
           "created_at": "2012-08-29T20:24:23Z",
-          "stats": { "score": 2531 },
-          "flags": { "is_submitter": true }
+          "stats": { "score": 2531 }
         }
       ]
     }
   ],
-  "more_comments": { "count": 22283, "cursor": "eyJkZXB0aCI6MiwibGltaXQi…" }
+  "more_comments": { "count": null, "cursor": "eyJjdXIiOiJZMjl0YldWdWRI…" }
 }
 ```
 
@@ -59,6 +58,7 @@ Reddit Scraper is a **free and open-source** scraper that gets you **unlimited**
 git clone https://github.com/omkarcloud/reddit-scraper
 cd reddit-scraper
 python -m pip install -r requirements.txt
+python -m patchright install chromium
 ```
 
 2️⃣ Start the API:
@@ -66,9 +66,11 @@ python -m pip install -r requirements.txt
 python run.py
 ```
 
+Comment pages are read through a real Chrome, because Reddit no longer serves comment trees to plain HTTP clients. It starts on the first comment request, off-screen; on a Linux server without a display run `xvfb-run python run.py` (or use Docker: `docker compose up`). From a cloud or datacenter IP, Reddit blocks comment pages, so set `REDDIT_PROXY=http://user:pass@host:port` to a rotating residential proxy.
+
 3️⃣ Get your first data:
 ```bash
-curl "http://localhost:8000/posts/comments?post=z1c9z&sort=top&limit=3&depth=1"
+curl "http://localhost:8000/posts/comments?post=z1c9z&sort=top&limit=3"
 ```
 
 ```json
@@ -81,17 +83,19 @@ curl "http://localhost:8000/posts/comments?post=z1c9z&sort=top&limit=3&depth=1"
     "stats": { "score": 216183, "upvote_ratio": 0.68, "comment_count": 22719 }
   },
   "sort": "top",
-  "comment_count": 3,
+  "comment_count": 25,
   "comments": [
     {
       "id": "c60o0iw",
       "author": { "username": "Biinaryy" },
-      "stats": { "score": 5402 },
+      "stats": { "score": 5399 },
       "text": "Here is a collection of all the questions and answers:\n\nQuestion:…",
-      "replies": []
+      "replies": [
+        { "id": "c60pmox", "depth": 1, "author": { "username": "delmar15" }, "stats": { "score": 2574 } }
+      ]
     }
   ],
-  "more_comments": { "count": 26832 }
+  "more_comments": { "count": 76, "cursor": "eyJjdXIiOiJZMjl0…" }
 }
 ```
 

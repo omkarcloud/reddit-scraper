@@ -12,6 +12,7 @@ from collections import Counter
 
 from . import parsers as P
 from . import shared as S
+from . import shreddit as H
 from . import www
 from .fetch import RedditNotFound, get_json, get_www, run_parallel
 
@@ -23,10 +24,16 @@ def _name(subreddit):
 def details(subreddit, include_rules=True):
     """The subreddit's public metadata, with its rules."""
     name = _name(subreddit)
-    about = get_json(f"/r/{name}/about", label=f"r/{name}")
+    try:
+        about = S.about_json("r", name)
+    except RedditNotFound as e:
+        if e.reason:
+            e.details.setdefault("subreddit", name)
+            raise
+        raise RedditNotFound(f"r/{name} not found", reason="subreddit_not_found", subreddit=name)
     parsed = P.subreddit(about)
     if parsed is None:
-        raise RedditNotFound(f"r/{name} not found")
+        raise RedditNotFound(f"r/{name} not found", reason="subreddit_not_found", subreddit=name)
     out = {"subreddit": parsed}
     if include_rules:
         try:
@@ -46,9 +53,16 @@ def posts(subreddit, sort="hot", time=None, cursor=None, limit=25):
 
 def comments(subreddit, cursor=None, limit=25):
     """The subreddit's live comment stream (newest first), each comment
-    with the post it was made on."""
+    with the post it was made on — from the www stream page through the
+    local Chrome (oauth /r/<sub>/comments is walled since 2026-10-24). A
+    refused page is explained by the subreddit's /about (gold-only,
+    private, banned, unknown)."""
     name = _name(subreddit)
-    out = S.listing(f"/r/{name}/comments", S.page_params(cursor, limit), P.comment, "comments")
+    try:
+        out = H.comment_stream(name, cursor, limit)
+    except RedditNotFound:
+        S.about_json("r", name)            # raises the reasoned RedditNotFound when Reddit names one
+        raise
     return {"subreddit": name, **out}
 
 
@@ -86,28 +100,41 @@ def wiki(subreddit, page=None):
 def similar(subreddit):
     """Subreddits Reddit recommends next to this one (/api/similar_subreddits)."""
     name = _name(subreddit)
-    about = get_json(f"/r/{name}/about", label=f"r/{name}")
+    about = S.about_json("r", name)
     data = (about or {}).get("data") or {}
     fullname = data.get("name")
     if not fullname:
         raise RedditNotFound(f"r/{name} not found")
-    payload = get_json("/api/similar_subreddits", {"sr_fullnames": fullname}, label=f"r/{name} similar")
-    out = P.parse_listing(payload, P.subreddit, "subreddits")
+    # The answer depends on the bearer's device bucket: 2–5 in 8 freshly
+    # minted app tokens get an empty listing for every subreddit (measured
+    # twice on 2026-10-16), so an empty answer re-mints the process token and
+    # asks again (6 tries ≈ 5% residual empties); a token that answers is kept.
+    from .fetch import bearer
+    attempts = 6
+    for attempt in range(attempts):
+        payload = get_json("/api/similar_subreddits", {"sr_fullnames": fullname}, label=f"r/{name} similar")
+        out = P.parse_listing(payload, P.subreddit, "subreddits")
+        if out["subreddits"] or attempt == attempts - 1:
+            break
+        bearer(force=True)
     return {"subreddit": name, "subreddit_count": len(out["subreddits"]), "subreddits": out["subreddits"]}
 
 
 def sticky(subreddit, position=1):
-    """A pinned post of the subreddit (position 1 or 2) with its top comments."""
+    """A pinned post of the subreddit (position 1 or 2) with its top comments.
+    /about/sticky redirects to the post's /comments/<id>, walled since
+    2026-10-20, so the post is the position-th stickied post at the top of
+    the hot listing, and its first comment page (25 top-level comments with
+    their inline replies) comes from the shreddit tree partial in the local Chrome."""
     name = _name(subreddit)
-    payload = get_json(f"/r/{name}/about/sticky", {"num": position}, label=f"r/{name} sticky {position}")
-    if not isinstance(payload, list) or not payload:
-        raise RedditNotFound(f"r/{name} has no sticky post at position {position}")
-    post_children, _ = P.listing_children(payload[0])
-    post = P.post(post_children[0]) if post_children else None
+    payload = get_json(f"/r/{name}/hot", {"limit": 5}, label=f"r/{name} sticky {position}")
+    pinned = [c for c in P.listing_children(payload)[0] if (c.get("data") or {}).get("stickied")]
+    post = P.post(pinned[position - 1]) if len(pinned) >= position else None
     if post is None:
         raise RedditNotFound(f"r/{name} has no sticky post at position {position}")
-    comments, more = P.comment_tree(P.listing_children(payload[1])[0] if len(payload) > 1 else [], post["id"])
-    return {"subreddit": name, "position": position, "post": post, "comments": comments, "more_comments": more}
+    page = H.tree(post["id"], name, "best", limit=0)
+    return {"subreddit": name, "position": position, "post": post, "comments": page["comments"],
+            "more_comments": page["more_comments"]}
 
 
 def batch(subreddits):
@@ -129,7 +156,10 @@ def batch(subreddits):
     seen_names = {s["name"].lower() for s in found}
     seen_ids = {s["id"] for s in found if s.get("id")}
     missing = [n for n in names if n.lower() not in seen_names] + [i for i in ids if i.split("_", 1)[-1] not in seen_ids]
-    return {"count": len(found), "subreddits": found, "missing": missing}
+    out = {"count": len(found), "subreddits": found, "missing": missing}
+    if ids:
+        out["note"] = S.T5_IDS_UNRESOLVABLE
+    return out
 
 
 def flairs(subreddit, sample_size=100):
@@ -173,7 +203,7 @@ def leaderboard(topic=None):
     if topic:
         page = get_www("/explore/", label="explore")
         topics = www.explore_topics(page)
-        match = next((t for t in topics if t["slug"] == topic), None)
+        match = next((t for t in topics if t["slug"] == topic.lower()), None)
         if match is None:
             raise RedditNotFound(f"explore topic {topic!r} not found; one of: " + ", ".join(t["slug"] for t in topics))
         path = f"/explore/{match['id']}/{match['slug']}/"
@@ -182,11 +212,10 @@ def leaderboard(topic=None):
     topics = www.explore_topics(page)
     by_name = {}
     names = [c["name"] for c in cards]
-    for i in range(0, len(names), 100):
-        for child in S.info_by_subreddit_names(names[i:i + 100]):
-            parsed = P.subreddit(child)
-            if parsed:
-                by_name[parsed["name"].lower()] = parsed
+    for child in S.info_by_subreddit_names(names, best_effort=True):
+        parsed = P.subreddit(child)
+        if parsed:
+            by_name[parsed["name"].lower()] = parsed
     out = []
     for rank, card in enumerate(cards, 1):
         full = by_name.get(card["name"].lower())

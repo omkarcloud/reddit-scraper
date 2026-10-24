@@ -1,6 +1,6 @@
 """Search and feed endpoints: post / subreddit / user search and
 autocomplete on the JSON API; comment and media search through the www
-search partial (ids from the HTML, hydrated with /api/info); the popular
+search partial (ids from the HTML, hydrated per id — see shared.py); the popular
 feed per country, r/all and the anonymous front page.
 
 Search sorts: relevance | hot | top | new | comments; `time` applies to
@@ -8,6 +8,7 @@ top-sorted (and any post) searches. Reddit's search syntax passes through
 (subreddit:python, author:spez, flair:Showcase, self:yes, url:..., nsfw:no).
 """
 from . import parsers as P
+from . import refs
 from . import shared as S
 from . import www
 from .fetch import RedditBadRequest, get_json, get_www
@@ -64,7 +65,7 @@ def autocomplete(query, limit=10, include_nsfw=False, include_profiles=True):
     return {"query": query, "count": len(items), "results": items}
 
 
-def _www_search(kind, query, sort, time, cursor):
+def _www_search(kind, query, sort, time, cursor, include_nsfw=False):
     params = {"q": query, "type": kind}
     if sort and sort != "relevance":
         params["sort"] = WWW_SEARCH_SORTS.get(sort, sort)
@@ -72,23 +73,26 @@ def _www_search(kind, query, sort, time, cursor):
         params["t"] = time
     if cursor:
         params["cursor"] = cursor
-    return get_www("/svc/shreddit/search/", params, label=f"{kind} search")
+    return get_www("/svc/shreddit/search/", params, label=f"{kind} search", over18=include_nsfw)
 
 
-def search_comments(query, sort="relevance", time="all", cursor=None):
-    """Comments matching `query` (the www Comments tab: ~9 per page)."""
-    page = _www_search("comments", query, sort, time, cursor)
-    ids = www.search_comment_ids(page)
-    things = S.info_by_ids_ordered(ids) if ids else []
-    comments = [c for c in (P.comment(t, include_replies=False) for t in things) if c]
+def search_comments(query, sort="relevance", time="all", cursor=None, include_nsfw=False):
+    """Comments matching `query` (the www Comments tab: ~9 per page). Each
+    hit is hydrated through its shreddit single-comment partial in the
+    local Chrome (one call per comment): /api/info and the
+    comments' own threads are walled. NSFW posts' comments only with include_nsfw."""
+    page = _www_search("comments", query, sort, time, cursor, include_nsfw)
+    found = www.search_comment_refs(page)
+    ids = [refs.strip_kind(ref["id"]) for ref in found]
+    comments = S.comments_by_ids(ids) if ids else []
     next_cursor = www.next_cursor(page) if ids else None
     return {"query": query, "sort": sort, "time": time, "comment_count": len(comments), "comments": comments,
             "next_cursor": next_cursor, "has_more": bool(next_cursor)}
 
 
-def search_media(query, sort="relevance", time="all", cursor=None):
+def search_media(query, sort="relevance", time="all", cursor=None, include_nsfw=False):
     """Image / video / gallery posts matching `query` (the www Media tab)."""
-    page = _www_search("media", query, sort, time, cursor)
+    page = _www_search("media", query, sort, time, cursor, include_nsfw)
     ids = www.search_post_ids(page)
     things = S.info_by_ids_ordered(ids) if ids else []
     posts = [p for p in (P.post(t) for t in things) if p]

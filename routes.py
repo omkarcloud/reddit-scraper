@@ -32,6 +32,7 @@ def call(label, schema, fn):
     data, error = load_query(schema, query_dict())
     if error:
         return json_response(error, 400)
+    data.pop("refresh", None)              # the hosted API's cache bypass; this server has no cache
     try:
         return json_response(fn(**data))
     except ValueError as e:                # bad value
