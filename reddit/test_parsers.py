@@ -359,10 +359,13 @@ def test_inline_media_in_text_posts():
     # one image pasted into the body (Patrik's example 1tz6rae)
     post = P.post(fx["image"])
     assert post["type"] == "text" and post["media"]["type"] == "inline"
+    sizes = [{"link": v["u"], "width": v["x"], "height": v["y"]}
+             for v in fx["image"]["data"]["media_metadata"]["m7yuys7nef5h1"]["p"]]
+    assert [s["width"] for s in sizes] == [108, 216, 320, 640, 960]
     assert post["media"]["images"] == [{
         "id": "m7yuys7nef5h1", "type": "image", "link": "https://i.redd.it/m7yuys7nef5h1.png", "width": 960, "height": 540,
-        "mime": "image/png", "gif_link": None, "mp4_link": None, "dash_link": None, "caption": None, "outbound_link": None,
-        "status": "valid"}]
+        "sizes": sizes, "mime": "image/png", "gif_link": None, "mp4_link": None, "dash_link": None, "caption": None,
+        "outbound_link": None, "status": "valid"}]
     assert post["media"]["video"] is None and post["media"]["embed"] is None
     # NSFW: Reddit's thumbnail is the word "nsfw" -> the file's own smallest preview instead of null
     nsfw = P.post(fx["nsfw_image"])
@@ -387,6 +390,39 @@ def test_inline_media_in_text_posts():
         "vid1": {"e": "RedditVideo", "status": "valid", "hlsUrl": "https://v.redd.it/link/x/asset/vid1/HLSPlaylist.m3u8?a=1",
                  "dashUrl": "https://v.redd.it/link/x/asset/vid1/DASHPlaylist.mpd?a=1", "x": 100, "y": 50, "isGif": False, "id": "vid1"}}}})
     assert comment["media"][0]["type"] == "video" and comment["media"][0]["dash_link"].endswith("DASHPlaylist.mpd?a=1")
+
+
+def test_image_sizes():
+    # every image item lists Reddit's downsized copies (2026-10-29, for
+    # callers with a download cap): smallest first, signed preview links,
+    # the original stays in link/width/height
+    media = load("media_posts.json")
+    image = P.post(media["image"])["media"]["images"][0]
+    assert [s["width"] for s in image["sizes"]] == [108, 216, 320, 640, 960, 1080]
+    largest = media["image"]["preview"]["images"][0]["resolutions"][-1]
+    assert image["width"] == 1179 and image["sizes"][-1] == {"link": largest["url"], "width": 1080, "height": largest["height"]}
+    assert all(s["link"].startswith("https://preview.redd.it/16pkfmzclyqh1.jpeg?width=") and "&s=" in s["link"]
+               for s in image["sizes"])
+    gallery = P.post(media["gallery"])["media"]["images"]
+    assert [s["width"] for s in gallery[0]["sizes"]] == [108, 216, 320, 640, 960, 1080]
+    assert gallery[0]["sizes"][0]["link"].startswith("https://preview.redd.it/nlt20xoos1rh1.png")
+    assert gallery[1]["sizes"][0]["link"].startswith("https://preview.redd.it/ew5b0ayos1rh1.png")
+    # a RedditVideo pasted into a text post has no previews
+    rich = P.post(load("inline_media_posts.json")["video"])["media"]["images"]
+    assert rich[0]["type"] == "video" and rich[0]["sizes"] == []
+    assert rich[5]["type"] == "image" and rich[5]["sizes"] and rich[5]["sizes"][0]["width"] == 108
+    # no resolutions at all -> []; an unsorted / duplicated list is normalised
+    bare = P.post({"kind": "t3", "data": {"id": "x", "title": "t", "permalink": "/r/a/comments/x/t/", "post_hint": "image",
+                                          "url": "https://i.redd.it/x.jpg", "preview": {"images": [{"source": {"url": "https://i.redd.it/x.jpg", "width": 800, "height": 600}}]}}})
+    assert bare["media"]["images"][0]["sizes"] == []
+    assert P._sizes([{"url": "https://p/640", "width": 640, "height": 1}, {"url": "https://p/108", "width": 108, "height": 1},
+                     {"url": "https://p/640b", "width": 640, "height": 1}, {"width": 320}]) == [
+        {"link": "https://p/108", "width": 108, "height": 1}, {"link": "https://p/640", "width": 640, "height": 1}]
+    # comment media goes through the same item builder
+    comment = P.comment({"kind": "t1", "data": {"id": "c1", "link_id": "t3_x", "body": "https://preview.redd.it/abc123.png", "media_metadata": {
+        "abc123": {"e": "Image", "m": "image/png", "status": "valid", "id": "abc123", "s": {"u": "https://preview.redd.it/abc123.png?s=1", "x": 500, "y": 400},
+                   "p": [{"u": "https://preview.redd.it/abc123.png?width=108&s=2", "x": 108, "y": 86}]}}}})
+    assert comment["media"][0]["sizes"] == [{"link": "https://preview.redd.it/abc123.png?width=108&s=2", "width": 108, "height": 86}]
 
 
 def test_dash_manifests():

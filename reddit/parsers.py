@@ -272,6 +272,23 @@ def _dimensions(source):
             "height": to_int(source.get("height") or source.get("y"))}
 
 
+def _sizes(variants):
+    """Reddit's downsized copies of an image (preview.images[].resolutions,
+    media_metadata[id].p), smallest first, as [{link, width, height}]. The
+    URLs are signed per size, so they are taken verbatim (never built).
+    [] when Reddit sent none. Added 2026-10-29 for callers with a download
+    cap (a customer runs image recognition and refuses files over 5 MB)."""
+    out, seen = [], set()
+    for variant in variants if isinstance(variants, list) else []:
+        size = _dimensions(variant)
+        if not size or not size["link"] or size["width"] in seen:
+            continue
+        seen.add(size["width"])
+        out.append(size)
+    out.sort(key=lambda size: size["width"] or 0)
+    return out
+
+
 # ---- media -----------------------------------------------------------------------------------
 
 def reddit_video(video, poster=None):
@@ -345,7 +362,7 @@ def parse_dash_manifest(xml_text, base):
 
 
 def _preview_image(data):
-    """preview.images[0] -> {source{link,width,height}, gif_link, mp4_link}."""
+    """preview.images[0] -> {source{link,width,height}, sizes, gif_link, mp4_link}."""
     preview = data.get("preview") or {}
     images = preview.get("images") or []
     if not images or not isinstance(images[0], dict):
@@ -354,6 +371,7 @@ def _preview_image(data):
     variants = first.get("variants") or {}
     return {
         "source": _dimensions(first.get("source")),
+        "sizes": _sizes(first.get("resolutions")),
         "gif_link": image_url(((variants.get("gif") or {}).get("source") or {}).get("url")),
         "mp4_link": image_url(((variants.get("mp4") or {}).get("source") or {}).get("url")),
     }
@@ -381,7 +399,9 @@ def _metadata_image(media_id, info, caption=None, outbound=None):
     """One media_metadata entry -> a media item. Image / AnimatedImage
     entries carry the file in `s` ({u | gif, mp4, x, y}); a RedditVideo
     entry has no `s` at all: its size is top-level and it offers only the
-    HLS / DASH playlists (dashUrl, hlsUrl), so `link` is the HLS one."""
+    HLS / DASH playlists (dashUrl, hlsUrl), so `link` is the HLS one.
+    `sizes` are the entry's `p` previews (still images, also for an
+    AnimatedImage; a RedditVideo has none)."""
     kind = clean(info.get("e"))
     mime = clean(info.get("m"))
     source = info.get("s") or {}
@@ -400,6 +420,7 @@ def _metadata_image(media_id, info, caption=None, outbound=None):
         "link": original or image_url(source.get("u")) or image_url(source.get("gif")) or hls,
         "width": to_int(source.get("x") if source else info.get("x")),
         "height": to_int(source.get("y") if source else info.get("y")),
+        "sizes": _sizes(info.get("p")),
         "mime": mime or ("video/mp4" if kind == "RedditVideo" else None),
         "gif_link": image_url(source.get("gif")),
         "mp4_link": image_url(source.get("mp4")),
@@ -483,6 +504,7 @@ def post_type_and_media(data):
         is_gif = bool((preview or {}).get("mp4_link")) or (url or "").split("?")[0].lower().endswith(".gif")
         image = {"id": None, "type": "animated_image" if is_gif else "image", "link": url,
                  "width": (poster or {}).get("width"), "height": (poster or {}).get("height"),
+                 "sizes": (preview or {}).get("sizes") or [],
                  "mime": None, "gif_link": (preview or {}).get("gif_link"),
                  "mp4_link": (preview or {}).get("mp4_link"), "dash_link": None, "caption": None,
                  "outbound_link": None, "status": None}
