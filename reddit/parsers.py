@@ -77,6 +77,7 @@ Deliberately dropped as noise:
 """
 import base64
 import json
+import re
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit
 
@@ -395,6 +396,26 @@ def _gallery_images(data):
     return out
 
 
+_PREVIEW_FILE_RE = re.compile(r"/([A-Za-z0-9]+)\.([A-Za-z0-9]+)(?:[?#]|$)")
+
+
+def _file_ext(media_id, info, mime):
+    """The extension of the original file on i.redd.it. Reddit keeps the
+    uploaded spelling and serves ONLY that one: a file uploaded as .jpeg is
+    a 404 at .jpg and vice versa (checked 2026-10-31 on 152 gallery images:
+    mime image/jpeg <-> .jpeg, image/jpg <-> .jpg, every time). The entry's
+    own preview URLs (preview.redd.it/<id>.<ext>?...) carry it; the mime
+    subtype, taken verbatim, is the fallback. Until 2026-10-31 image/jpeg
+    was rewritten to .jpg, which broke every .jpeg original."""
+    candidates = [(info.get("s") or {}).get("u")]
+    candidates += [p.get("u") for p in info.get("p") or [] if isinstance(p, dict)]
+    for url in candidates:
+        match = _PREVIEW_FILE_RE.search(urlsplit(str(url or "")).path + "?")
+        if match and match.group(1) == media_id:
+            return match.group(2).lower()
+    return mime.split("/")[-1].lower() if mime else None
+
+
 def _metadata_image(media_id, info, caption=None, outbound=None):
     """One media_metadata entry -> a media item. Image / AnimatedImage
     entries carry the file in `s` ({u | gif, mp4, x, y}); a RedditVideo
@@ -405,9 +426,7 @@ def _metadata_image(media_id, info, caption=None, outbound=None):
     kind = clean(info.get("e"))
     mime = clean(info.get("m"))
     source = info.get("s") or {}
-    ext = mime.split("/")[-1] if mime else None
-    if ext == "jpeg":
-        ext = "jpg"
+    ext = _file_ext(media_id, info, mime)
     # emotes / stickers (`t`: emoji | sticker, ids like emote|pack|name) are
     # served from redditstatic, never i.redd.it: keep their `s.u` instead
     hosted = bool(media_id) and media_id.isalnum() and clean(info.get("t")) not in ("emoji", "sticker")

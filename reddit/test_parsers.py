@@ -437,3 +437,27 @@ def test_dash_manifests():
     # the listing parser never guesses a legacy audio name
     old = P.reddit_video({"fallback_url": "https://v.redd.it/abc/DASH_1080.mp4?source=fallback", "has_audio": True})
     assert old["audio_link"] is None and old["link"] == "https://v.redd.it/abc/DASH_1080.mp4"
+
+
+def test_original_link_keeps_the_uploaded_extension():
+    # i.redd.it serves only the uploaded spelling: a .jpeg file is a 404 at .jpg
+    # (Patrik, 2026-10-31: post 1xil650 g6evuuwpbdyh1). The extension comes from
+    # Reddit's own preview URL for the file, the mime subtype verbatim otherwise.
+    def item(mid, mime, ext=None):
+        info = {"e": "Image", "m": mime, "status": "valid", "s": {"x": 1200, "y": 900}}
+        if ext:
+            info["s"]["u"] = f"https://preview.redd.it/{mid}.{ext}?width=1200&format=pjpg&auto=webp&s=abc"
+            info["p"] = [{"u": f"https://preview.redd.it/{mid}.{ext}?width=108&crop=smart&auto=webp&s=def", "x": 108, "y": 81}]
+        return P._metadata_image(mid, info)
+
+    assert item("g6evuuwpbdyh1", "image/jpeg", "jpeg")["link"] == "https://i.redd.it/g6evuuwpbdyh1.jpeg"
+    assert item("ek9bu0x43ouh1", "image/jpg", "jpg")["link"] == "https://i.redd.it/ek9bu0x43ouh1.jpg"
+    assert item("m651nwypl2uh1", "image/png", "png")["link"] == "https://i.redd.it/m651nwypl2uh1.png"
+    # no preview URLs: the mime subtype as is (never jpeg -> jpg)
+    assert item("aaaa1111", "image/jpeg")["link"] == "https://i.redd.it/aaaa1111.jpeg"
+    assert item("bbbb2222", "image/jpg")["link"] == "https://i.redd.it/bbbb2222.jpg"
+    # the preview URL wins over a mime that disagrees; another file's URL is ignored
+    assert item("cccc3333", "image/jpeg", "jpg")["link"] == "https://i.redd.it/cccc3333.jpg"
+    other = P._metadata_image("dddd4444", {"e": "Image", "m": "image/jpeg", "s": {
+        "u": "https://preview.redd.it/zzzz9999.jpg?width=10&s=x", "x": 10, "y": 10}})
+    assert other["link"] == "https://i.redd.it/dddd4444.jpeg"
